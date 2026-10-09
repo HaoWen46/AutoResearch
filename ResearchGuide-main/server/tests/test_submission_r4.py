@@ -54,3 +54,12 @@ def test_corrupted_member_raises_submission_error():
     msg = "压缩包里的「README.md」读不出来（文件损坏或用了不支持的压缩方式），请重新打包再交。"
     with pytest.raises(submission.SubmissionError, match=re.escape(msg)):
         submission.review(bad, PROJECT)
+
+
+def test_references_resolve_relative_to_a_nested_readme():
+    """压缩包里 README 在 work/ 下（顶层还有 LICENSE，所以不会被当成外层目录剥掉）：它写的 results/table.csv 指 work/results/table.csv。"""
+    readme = BASE + "\n## 结果在哪\nresults/table.csv 是两个基线的结果表。\n"
+    r = submission.review(make_zip({"LICENSE": "MIT", "work/README.md": readme, "work/src/main.py": "print(1)",
+                                    "work/results/table.csv": "a,b\n1,2\n"}), PROJECT)
+    assert "work/results/table.csv" in r["checks"]["referenced"]
+    assert "results/table.csv" not in r["checks"]["missing_refs"]

@@ -652,10 +652,11 @@ def _degraded_proposal(uid: str, message: str, env: dict[str, Any]) -> dict[str,
     """
     ops: list[dict[str, Any]] = []
     plan = env.get("active_plan") or {}
-    if not plan.get("direction") and not env.get("lib_facts"):
+    import onboarding
+    if not plan.get("direction") and (not env.get("lib_facts") or onboarding.answers_current_round(uid, message)):
         # 还没方向、模型又不可用：走规则版五问（会推进、会给可点的选项），不要一遍遍问同一句。
-        # 他这句话里说到了院系/专业时例外：先用本地知识库答他（下面那条分支）
-        import onboarding
+        # 他这句话里说到了院系/专业时例外：先用本地知识库答他（下面那条分支）——
+        # 但点的是当前这一问的选项（「数学课学过一些」）就还是在答题，照样往下走（Codex 复现：原来卡在这一问）
         step = onboarding.advance(uid, message)
         if step is not None:
             return {

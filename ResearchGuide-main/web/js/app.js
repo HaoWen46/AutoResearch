@@ -1115,37 +1115,23 @@ async function portraitBar() {
     const chip = el("div", "portrait-chip" + (p.active ? " on" : ""));
     const name = el("button", "portrait-name", esc(p.name));
     name.type = "button";
-    name.onclick = async () => {
-      if (p.active) return;
+    name.onclick = () => portraitOp(async () => {
+      if (p.active) return null;
       // 服务器切成功了才改前端记着的画像：原来先改，切失败时任务区显示 B 的教程、却在 A 里建任务（Codex 复现）
-      try {
-        await api("POST", "/api/portraits/activate", { uid: S.uid, id: p.id });
-      } catch (e) { toast(e.message); return; }
-      S.portraitId = p.id;
-      setView(S.view === "confirm" ? "confirm" : "dialogue");
-    };
+      return api("POST", "/api/portraits/activate", { uid: S.uid, id: p.id });
+    }, S.view === "confirm" ? "confirm" : "dialogue");
     const del = el("button", "portrait-x", "删除");
     del.type = "button";
     del.onclick = async () => {
       if (!window.confirm(`删除「${p.name}」？这份画像的对话和记录都会清掉，不能恢复。`)) return;
-      try {
-        await api("DELETE", `/api/portraits/${encodeURIComponent(p.id)}?uid=${S.uid}`);
-      } catch (e) { toast(e.message); return; }
-      S.portraitId = "";
-      setView("dialogue");
+      await portraitOp(() => api("DELETE", `/api/portraits/${encodeURIComponent(p.id)}?uid=${S.uid}`), "dialogue");
     };
     chip.append(name, del);
     bar.appendChild(chip);
   });
   const add = el("button", "portrait-add", "新建");
   add.type = "button";
-  add.onclick = async () => {
-    let created;
-    try { created = await api("POST", "/api/portraits", { uid: S.uid }); } catch (e) { toast(e.message); return; }
-    const active = (created.portraits || []).find((item) => item.active);
-    S.portraitId = active ? active.id : "";
-    setView("dialogue");
-  };
+  add.onclick = () => portraitOp(() => api("POST", "/api/portraits", { uid: S.uid }), "dialogue");
   bar.appendChild(add);
   return bar;
 }
@@ -1705,6 +1691,26 @@ function flattenField(root) {
 
 function trailStorageKey() {
   return "rg_trail_" + S.uid + (S.portraitId ? "_" + S.portraitId : "");
+}
+
+/* 新建、切换、删除画像一次只做一件：连点 B 再点 C，两个请求的响应可能倒着回来，
+   原来按回来的顺序记，前端停在 B、服务器在 C，任务区就拿 B 的教程在 C 里建任务（Codex 复现）。
+   做完以服务器回的「哪一份是当前的」为准，不以点了哪个为准。 */
+let portraitBusy = false;
+async function portraitOp(run, nextView) {
+  if (portraitBusy) { toast("正在切换画像，稍等"); return; }
+  portraitBusy = true;
+  try {
+    const r = await run();
+    if (r === null) return;
+    const active = ((r && r.portraits) || []).find((item) => item.active);
+    S.portraitId = active ? active.id : "";
+    setView(nextView);
+  } catch (e) {
+    toast(e.message);
+  } finally {
+    portraitBusy = false;
+  }
 }
 
 async function ensurePortrait() {

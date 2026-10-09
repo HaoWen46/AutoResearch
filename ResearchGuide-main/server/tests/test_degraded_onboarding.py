@@ -39,3 +39,29 @@ def test_a_new_student_gets_through_the_five_questions_without_the_model():
     # 问完之后再说话：指到方向页，不重新开始五问
     after = dialogue.turn(uid, "然后呢")
     assert "方向" in after["reply"] and store.get_onboard_state(uid)["phase"] == "done"
+
+
+def test_an_option_that_mentions_a_subject_still_answers_the_question():
+    """「数学课学过一些」会命中知识库里的数学专业；原来没模型时就转去讲数学专业，这一问永远答不完。"""
+    uid = store.create_user("选项")["uid"]
+    onboarding.start(uid)
+    dialogue.turn(uid, "大一 · 理科 / 工科")
+    assert store.get_onboard_state(uid)["phase"] == "courses"
+    r = dialogue.turn(uid, "数学课学过一些（高数 / 线代等）")
+    assert store.get_onboard_state(uid)["phase"] != "courses"  # 往下走了
+    assert r.get("offered_actions")
+
+
+def test_the_no_model_wizard_never_calls_the_model(monkeypatch):
+    """模型配着、但这一轮连不上（_propose 失败）：规则版五问不能再去调它。"""
+    monkeypatch.setattr(dialogue.llm, "enabled", lambda: True)
+    monkeypatch.setattr(onboarding.llm, "enabled", lambda: True)
+    monkeypatch.setattr(dialogue, "_propose", lambda env: None)
+    called = []
+    monkeypatch.setattr(onboarding.llm, "chat_json", lambda *a, **k: called.append(1) or None)
+    monkeypatch.setattr(onboarding.llm, "chat", lambda *a, **k: called.append(1) or None)
+    uid = store.create_user("连不上")["uid"]
+    store.set_onboard_state(uid, {"phase": "background", "round_no": 1})
+    dialogue.turn(uid, "我是大二的，平时喜欢自己动手写点小工具")  # 自由文本（不提院系）：原来会走模型抽取
+    assert called == []
+    assert store.get_onboard_state(uid)["phase"] == "courses"

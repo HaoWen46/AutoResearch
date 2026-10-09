@@ -337,7 +337,7 @@ def _path_tokens(text: str) -> set[str]:
     return out
 
 
-def _referenced_paths(text: str, inventory: list[dict[str, Any]]) -> tuple[list[str], list[str]]:
+def _referenced_paths(text: str, inventory: list[dict[str, Any]], readme_path: str = "") -> tuple[list[str], list[str]]:
     paths = {i["path"] for i in inventory}
     names: dict[str, list[str]] = {}
     for p in paths:
@@ -345,7 +345,11 @@ def _referenced_paths(text: str, inventory: list[dict[str, Any]]) -> tuple[list[
     found, missing = [], []
     for tok in _path_tokens(text):
         tok = re.sub(r"/+", "/", tok).lstrip("./")
-        if tok in paths:
+        # README 在子目录里（work/README.md）时，它写的 results/x.csv 指的是 work/results/x.csv
+        base = readme_path.rsplit("/", 1)[0] + "/" if "/" in readme_path else ""
+        if base and base + tok in paths:
+            found.append(base + tok)
+        elif tok in paths:
             found.append(tok)
         elif "/" not in tok and len(names.get(tok, [])) == 1:
             # 带目录的引用必须路径完全对上（写 results/ 实际在 data/ 算没找到）；只写文件名时，同名文件唯一才认
@@ -359,7 +363,7 @@ def rule_checks(bundle: dict[str, Any], project: dict[str, Any]) -> dict[str, An
     inv = bundle["inventory"]
     readme_path, readme = _readme(bundle)
     sec = _sections(readme) if readme else {k: False for k in SECTION_MARKS}
-    found, missing = _referenced_paths(readme, inv)
+    found, missing = _referenced_paths(readme, inv, readme_path)
     results = [i for i in inv if not i["empty"] and i["kind"] in ("figure", "data") and i["path"] != readme_path]
     results += [i for i in inv if not i["empty"] and i["path"].lower().startswith(("results/", "result/", "output/", "outputs/", "结果/")) and i not in results]
     code = [i for i in inv if i["kind"] in ("code", "notebook")]

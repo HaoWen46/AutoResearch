@@ -180,7 +180,8 @@ def advance(uid: str, msg: str) -> dict[str, Any] | None:
     idx = _ROUND_INDEX.get(phase, 0)
     round_def = ROUNDS[idx]
     if msg.strip():
-        _extract(uid, round_def, msg)
+        # 只用规则抽取：走到这里就是模型不可用（额度用完或刚刚连失败），不能再去调它（Codex 复现：又一次超时、又扣一笔）
+        _extract(uid, round_def, msg, use_model=False)
     nxt = _TRANSITIONS.get(phase) or (ROUNDS[idx + 1]["id"] if idx + 1 < len(ROUNDS) else "done")
     if nxt == "done":
         store.set_onboard_state(uid, {**state, "phase": "done", "round_no": idx + 1})
@@ -191,6 +192,16 @@ def advance(uid: str, msg: str) -> dict[str, Any] | None:
     nxt_def = ROUNDS[_ROUND_INDEX[nxt]]
     return {"reply": f"{_ACK.get(phase, '')}{nxt_def['ask']}",
             "options": [o["label"] for o in nxt_def["options"]], "done": False}
+
+
+def answers_current_round(uid: str, msg: str) -> bool:
+    """这句话是不是在点当前这一问的选项。"""
+    state = store.get_onboard_state(uid)
+    phase = state.get("phase") or ROUNDS[0]["id"]
+    if phase == "done":
+        return False
+    round_def = ROUNDS[_ROUND_INDEX.get(phase, 0)]
+    return any(o["label"] == msg.strip() for o in round_def["options"])
 
 
 def _turn(reply: str, round_def: dict[str, Any], state: dict[str, Any],
@@ -205,7 +216,7 @@ def _turn(reply: str, round_def: dict[str, Any], state: dict[str, Any],
     }
 
 
-def _extract(uid: str, round_def: dict[str, Any], msg: str) -> list[UserFact]:
+def _extract(uid: str, round_def: dict[str, Any], msg: str, use_model: bool = True) -> list[UserFact]:
     """W0 规则抽取：命中选项 tag → 预设事实；自由文本 → declared 原文事实。"""
     matched = next((o for o in round_def["options"] if o["label"] == msg), None)
     evidence = [{"type": "onboard_message", "round": round_def["id"], "quote": msg}]
@@ -215,7 +226,7 @@ def _extract(uid: str, round_def: dict[str, Any], msg: str) -> list[UserFact]:
         out.append(UserFact(user_id=uid, category=cat, key=key, value=value,
                             confidence=conf, source=source, evidence=evidence, status="draft"))
     else:
-        fact = _extract_free_text(uid, round_def, msg, evidence)
+        fact = _extract_free_text(uid, round_def, msg, evidence, use_model)
         out.append(fact)
     for f in out:
         store.add_fact(f)
@@ -246,13 +257,15 @@ def _voice(user_msg: str, next_ask: str, fallback: str, closing: bool = False) -
     return text[:240]
 
 
-def _extract_free_text(uid: str, round_def: dict[str, Any], msg: str, evidence: list) -> UserFact:
+def _extract_free_text(uid: str, round_def: dict[str, Any], msg: str, evidence: list, use_model: bool = True) -> UserFact:
     category = _guess_category(round_def["id"])
     fallback = UserFact(
         user_id=uid, category=category, key=f"raw:{round_def['id']}",
         value=f"自述：「{msg[:80]}」", confidence=0.6, source="declared",
         evidence=evidence, status="draft",
     )
+    if not use_model:
+        return fallback
     data = llm.chat_json(
         "把学生的自述归纳成一条可核对的事实。category 只能是 background/interest/capability/preference。"
         "value 必须能在原话里找到依据，不要脑补。",

@@ -20,7 +20,7 @@ docker compose build
 docker compose up qiyan
 ```
 
-复制 `.env.example` 为 `.env` 并填 `LLM_API_KEY` 才会走模型。库文件在卷 `/data/qiyan.db`。
+复制 `.env.example` 为 `.env` 并填 `LLM_API_KEY` 才会走模型（compose 用 `env_file` 把它传进容器；`.env` 本身不进镜像，需要 Compose 2.24 以上）。库文件在卷 `/data/qiyan.db`。
 
 回滚：`docker compose down`，换回上一版镜像或 git 标签再 `build`。
 

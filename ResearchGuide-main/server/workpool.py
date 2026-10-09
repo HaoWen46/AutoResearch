@@ -89,10 +89,13 @@ class BoundedPool:
         线程是守护线程：不等的话进程一退，浏览器断开后还在写的那一轮（回复、记忆）就写一半没了（Codex 复现）。"""
         with self._cv:
             self._closing = True
-            queued = [job[0] for job in self._queue.values()]
+            # 排队的在锁里整个摘下来再取消：先放锁再逐个取消的话，刚做完的线程会趁空拿走一件开始跑（Codex 复现）
+            queued = list(self._queue.values())
+            self._queue.clear()
             self._cv.notify_all()
-        for f in queued:
-            f.cancel()
+        for job in queued:
+            job[0].cancel()
+        del queued
         deadline = time.monotonic() + wait
         with self._cv:
             while self.running and time.monotonic() < deadline:

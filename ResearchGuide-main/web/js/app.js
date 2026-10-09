@@ -1098,11 +1098,18 @@ function accountPanel() {
     await logout();
   });
   add("删除账号", "btn small ghost danger", async () => {
-    const typed = window.prompt("删除后，库里你的所有记录会立刻清掉，不能恢复。确定的话输入「删除」两个字：");
+    const back = parked && parked.guest ? `删的只是这个账号；这台浏览器上停着的访客号「${parked.nickname}」不受影响，删完切回它。` : "";
+    const typed = window.prompt(`删除后，库里你的所有记录会立刻清掉，不能恢复。${back}确定的话输入「删除」两个字：`);
     if (typed === null) return;
     if (typed.trim() !== "删除") { toast("没有删除：输入的不是「删除」"); return; }
     try {
       await api("DELETE", "/api/me");
+      if (back) {
+        // 停着的访客号是它唯一的凭证：原来跟着一起清掉，访客的记录还在库里却再也进不去（Codex 复现）
+        try { localStorage.removeItem(PARK_KEY); } catch (_) { /* 无痕模式等 */ }
+        setSession(parked, "me", `账号删了，已切回访客号「${parked.nickname}」`);
+        return;
+      }
       clearSession(true);
       reloadInto("home", "账号和记录都删了");
     } catch (e) { toast(e.message); }

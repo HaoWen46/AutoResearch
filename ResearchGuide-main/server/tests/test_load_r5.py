@@ -356,3 +356,26 @@ def test_draining_waits_for_running_work_and_drops_the_queue():
     assert queued.cancelled() and ran == [] and pool.stats()["queued"] == 0
     running.result(1)
     assert pool.submit(lambda: 7).result(5) == 7
+
+
+def test_draining_never_starts_queued_work():
+    """关的时候排队的整个摘下来再取消：原来先放锁再逐个取消，取消的间隙里刚做完的线程会拿走下一件开始跑（Codex 复现）。
+    这里把「间隙」拉长：取消第一件之前先放走在跑的那一件、再等一会儿。"""
+    pool = workpool.BoundedPool(1, 4, "t")
+    started, release, ran = threading.Event(), threading.Event(), []
+    running = pool.submit(lambda: started.set() or release.wait(5))
+    assert started.wait(5)
+    first = pool.submit(lambda: ran.append("first"))
+    pool.submit(lambda: ran.append("second"))
+    real_cancel = first.cancel
+
+    def slow_cancel():
+        release.set()
+        running.result(5)
+        time.sleep(0.2)  # 刚空出来的线程有时间去拿下一件
+        return real_cancel()
+
+    first.cancel = slow_cancel
+    pool.drain(wait=5)
+    time.sleep(0.1)
+    assert ran == [] and pool.stats()["queued"] == 0

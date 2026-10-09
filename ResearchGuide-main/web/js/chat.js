@@ -189,6 +189,7 @@ const ChatView = (() => {
     // 所以编辑期间挂起刷新，编辑结束再补一次。
     let editingCard = false;
     let refreshQueued = false;
+    let redrawQueued = false;  // 进行中的那一轮做完了要重画，但正在改记忆：等改完（见最后）
     let history = { messages: [], pending_action: null };
     try {
       history = await api("GET", `/api/dialogue/history?uid=${encodeURIComponent(S.uid)}`);
@@ -609,6 +610,11 @@ const ChatView = (() => {
           // 编辑结束（保存 / 取消 / 失焦）时收尾：放掉挂起的刷新。
           const finish = () => {
             editingCard = false;
+            if (redrawQueued) {
+              redrawQueued = false;
+              if (mySeq === seq && S.view === "dialogue") render($app);
+              return;
+            }
             if (refreshQueued) { refreshQueued = false; refreshFacts(); }
           };
           const restore = (v) => { value.textContent = v; };
@@ -687,7 +693,12 @@ const ChatView = (() => {
         stageLine.textContent = "上一句还在生成，好了会自动显示…";
         stageLine.classList.add("on");
       }
-      resumeFrom.then(() => { if (mySeq === seq && S.view === "dialogue") render($app); });
+      resumeFrom.then(() => {
+        if (mySeq !== seq || S.view !== "dialogue") return;
+        // 正在改一条记忆：重画会把输入框拔掉，失焦保存不一定触发，改动就没了（Codex 复现）。改完再画
+        if (editingCard) { redrawQueued = true; return; }
+        render($app);
+      });
     }
   }
 

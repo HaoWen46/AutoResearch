@@ -96,7 +96,7 @@ def test_upload_limit_stops_reading_early(monkeypatch):
 
 def test_review_queue_is_bounded(monkeypatch):
     monkeypatch.setattr(main, "_project_in_portrait_or_404", lambda uid, pid: ({"id": pid}, ""))
-    monkeypatch.setattr(main, "_review_pending", main.REVIEW_PENDING_MAX)
+    monkeypatch.setattr(main, "_review_full", lambda: True)
 
     async def go():
         async with _asgi() as c:
@@ -813,7 +813,7 @@ def test_notebook_outputs_are_skipped_without_building_objects():
     bundle = submission.read_zip(zipped(ok))
     assert bundle["texts"]["analysis.ipynb"] == '# 说明 "引号" {[}]\n\nprint(x)'
     assert submission._nb_object([("source", "x")]) == 1 and submission._nb_object([("cell_type", "code")]) == {"cell_type": "code"}
-    small = _json.dumps({"cells": [{"cell_type": "code", "source": "a", "outputs": [{"t": "}"}]}, {"cell_type": "markdown", "source": ["b", "c"]}]}).encode()
+    small = _json.dumps({"cells": [{"cell_type": "code", "source": "a", "outputs": [{"output_type": "stream", "t": "}"}]}, {"cell_type": "markdown", "source": ["b", "c"]}]}).encode()
     assert submission._ipynb_text(small) == ("a\n\nbc", True)
 
 

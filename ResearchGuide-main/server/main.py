@@ -16,7 +16,6 @@ import math
 import os
 import sqlite3
 import sys
-from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -1000,9 +999,15 @@ REVIEW_PENDING_MAX = 6      # 已收完、在排队或在评阅的；每个握�
 UPLOADS_MAX = 8             # 同时在上传的
 UPLOAD_IDLE_SECONDS = 20    # 这么久一个字节都没收到，就当连接卡住了
 UPLOAD_TOTAL_SECONDS = 300  # 总时限：20 MB 在 70 KB/s 的慢网上也传得完；只防一直吊着不传完的连接
-_REVIEW_POOL = ThreadPoolExecutor(max_workers=REVIEW_WORKERS, thread_name_prefix="review")
-_review_pending = 0  # 这两个计数只在事件循环线程里改，不用锁
-_uploads = 0
+# 在评阅和排队的都在这个池子里数（workpool：取消的排队活当场拿掉，连同它握着的压缩包）。原来另记一个计数，
+# 请求一取消计数就减，排队的活却还留在 ThreadPoolExecutor 里握着 20 MB：反复交了又断开，队里堆了 32 份（Codex 复现）
+_REVIEW = workpool.BoundedPool(REVIEW_WORKERS, REVIEW_PENDING_MAX - REVIEW_WORKERS, "review")
+_uploads = 0  # 只在事件循环线程里改，不用锁
+
+
+def _review_full() -> bool:
+    st = _REVIEW.stats()
+    return st["running"] + st["queued"] >= REVIEW_PENDING_MAX
 
 
 async def _read_capped(request: Request, limit: int, too_big: str | None = None) -> bytes:
@@ -1058,7 +1063,7 @@ async def project_submit(pid: str, uid: str, request: Request, portrait: str = "
     """请求体就是 .zip 本身（Content-Type: application/zip），不需要 multipart 依赖。
     portrait：前端打开这个项目页时的画像。已经切走了就不收：同一个项目 id 在两份画像里都有时，
     评阅会记进学生眼前不是的那一份。"""
-    global _review_pending, _uploads
+    global _uploads
     # 项目和「当时是哪个画像」在收上传之前、同一个读事务里一起拿，评阅用的就是这一份项目：
     # 原来项目另读一次，两次之间切了画像，A 的项目内容配上 B 的画像，评阅记进了 B（Codex 复现）。
     # 不用这个人的锁：同时交几份时不该互相 409。
@@ -1066,7 +1071,7 @@ async def project_submit(pid: str, uid: str, request: Request, portrait: str = "
     if portrait and portrait != current:
         raise HTTPException(409, "画像已经切换了：这个项目页属于原来那份画像。刷新页面再交。")
     portrait = current
-    if _uploads >= UPLOADS_MAX or _review_pending >= REVIEW_PENDING_MAX:
+    if _uploads >= UPLOADS_MAX or _review_full():
         raise HTTPException(503, "现在交的人太多，评阅在排队。请过一两分钟再交。")
     _uploads += 1
     try:
@@ -1075,16 +1080,19 @@ async def project_submit(pid: str, uid: str, request: Request, portrait: str = "
         _uploads -= 1
     if not data:
         raise HTTPException(400, "没有收到文件")
-    if _review_pending >= REVIEW_PENDING_MAX:
-        raise HTTPException(503, "现在交的人太多，评阅在排队。请过一两分钟再交。")
-    _review_pending += 1
     try:
-        # run_in_executor 不带上下文变量：不包一层，评阅里的模型调用就不知道算在谁头上（budget.py）
-        ctx = contextvars.copy_context()
-        return await asyncio.get_running_loop().run_in_executor(_REVIEW_POOL, ctx.run, _review_and_record, uid, p, data,
-                                                                portrait)
-    finally:
-        _review_pending -= 1
+        # workpool 带上上下文变量：评阅里的模型调用要知道算在谁头上（budget.py）
+        if _review_full():
+            raise Overloaded()
+        fut = _REVIEW.submit(_review_and_record, uid, p, data, portrait)
+    except Overloaded as exc:
+        raise HTTPException(503, "现在交的人太多，评阅在排队。请过一两分钟再交。") from exc
+    del data  # 压缩包只让排队的活握着：撤掉时一起放掉
+    try:
+        return await asyncio.wrap_future(fut)
+    except BaseException:
+        fut.cancel()  # 请求没了：还在排队就撤掉；已经在评的照样评完、记进项目
+        raise
 
 
 # ---------- 研读：领域工具包 / 每日情报 / 阅读卡 / 矩阵 ----------
@@ -1102,10 +1110,12 @@ def _reading(fn, *args):
 # 分开以后，等 arXiv 的不会拖住课程检索和建引文索引
 # max_pending：同时在做或在排队的不同请求最多几个。原来不封顶：一个人连发 120 个不同论文号，
 # 就排上 120 个抓取任务，请求取消了任务还留在队列里（Codex 复现）。
+# 线程池用 workpool：等的人走光时排队的活当场拿掉。ThreadPoolExecutor 取消了的还留在它的队里，
+# 反复要了又断开，上限 32 的队里实际堆了 112 件（Codex 复现）
 _FLIGHTS = {
-    "arxiv": AsyncFlight(ThreadPoolExecutor(max_workers=4, thread_name_prefix="arxiv"), max_pending=32),
-    "index": AsyncFlight(ThreadPoolExecutor(max_workers=2, thread_name_prefix="index"), max_pending=16),
-    "courses": AsyncFlight(ThreadPoolExecutor(max_workers=4, thread_name_prefix="courses"), max_pending=32),
+    "arxiv": AsyncFlight(workpool.BoundedPool(4, 32, "arxiv"), max_pending=32),
+    "index": AsyncFlight(workpool.BoundedPool(2, 16, "index"), max_pending=16),
+    "courses": AsyncFlight(workpool.BoundedPool(4, 32, "courses"), max_pending=32),
 }
 _FLIGHT_OF = {"paper": "arxiv", "daily": "arxiv", "index": "index", "courses": "courses"}
 

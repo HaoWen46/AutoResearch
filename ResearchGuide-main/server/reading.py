@@ -129,7 +129,7 @@ def review_card(k: dict[str, Any], paper: dict[str, Any], fields: dict[str, str]
     for key, label in (("claim_quote", "主张有原句锚点"), ("evidence_quote", "证据能在原文找到")):
         loc = quotes.locate(fields.get(key, ""), paper)
         add(key, label, loc["found"], "已定位" if loc["found"] else loc["reason"], loc.get("where", ""))
-    loc = quotes.locate(fields.get("limitation_quote", ""), paper)
+    loc = quotes.locate(fields.get("limitation_quote", ""), paper, prefer=LIMIT_SECTIONS)
     if loc["found"] and has_limit_section and loc.get("section") not in LIMIT_SECTIONS:
         add("limitation_quote", "局限出自作者自己的局限段", False,
             f"这句在「{loc['where']}」里。论文有局限 / 讨论段，局限要从那里引", loc.get("where", ""))

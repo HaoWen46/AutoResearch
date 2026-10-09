@@ -11,7 +11,7 @@ import threading
 import unicodedata
 from array import array
 from collections import OrderedDict
-from typing import Any
+from typing import Any, Iterable
 
 import arxiv
 from singleflight import SingleFlight
@@ -107,18 +107,35 @@ def clear_prepared() -> None:
         _PREPARED.clear()
 
 
-def locate(quote: str, paper: dict[str, Any]) -> dict[str, Any]:
-    """返回 {found, section, where, reason}。paper 是 arxiv.fulltext() 的结果。"""
+MAX_OCCURRENCES = 64  # 同一句在全文里出现的次数，看这么多处就够了
+
+
+def locate(quote: str, paper: dict[str, Any], prefer: Iterable[str] | None = None) -> dict[str, Any]:
+    """返回 {found, section, where, reason}。paper 是 arxiv.fulltext() 的结果。
+    prefer：想要它出自哪些章节（局限要出自局限段）。同一句在全文出现多次时，有一处在这些章节里就报那一处；
+    原来只看第一次出现：引言里先出现过一次，真在局限段里的引文也被判成「出自引言」（Codex 复现）。"""
     q = norm(quote).strip(' "\'')
     if len(q) < MIN_LEN:
         return {"found": False, "reason": f"引文太短（至少 {MIN_LEN} 个字符），没法当证据"}
     hay, pos, hay2, pos2 = _prepared(paper.get("text") or "")
-    i = hay.find(q)
-    if i < 0 and hay2 != hay:
-        i, pos = hay2.find(q), pos2
-    if i < 0:
+    wanted = set(prefer or ())
+    first: tuple[str | None] | None = None
+    for h, p in ((hay, pos), (hay2, pos2)) if hay2 != hay else ((hay, pos),):
+        i, seen = h.find(q), 0
+        while i >= 0 and seen < MAX_OCCURRENCES:
+            sec = arxiv.section_at(paper["text"], p[i] if i < len(p) else 0)
+            if first is None:
+                first = (sec,)
+            if not wanted or sec in wanted:
+                return _located(sec, paper)
+            i, seen = h.find(q, i + 1), seen + 1
+        if first is not None and not wanted:
+            break
+    if first is None:
         return {"found": False, "reason": "原文里找不到这句" + ("（只拿到了摘要，正文核对不了）" if paper.get("source") == "abstract" else "")}
-    src_pos = pos[i] if i < len(pos) else 0
-    sec = arxiv.section_at(paper["text"], src_pos)
+    return _located(first[0], paper)
+
+
+def _located(sec: str | None, paper: dict[str, Any]) -> dict[str, Any]:
     where = arxiv.section_cn(sec) if sec else ("摘要" if paper.get("source") == "abstract" else "正文")
     return {"found": True, "section": sec, "where": where, "reason": ""}

@@ -258,7 +258,7 @@ async function render() {
   try {
     switch (S.view) {
       case "login": renderLogin(); break;
-      case "dialogue": ChatView.render($app); break;
+      case "dialogue": await ChatView.render($app); break;  // 要 await：不然它取画像失败时绕过下面的提示
       case "confirm": await renderConfirm(); break;
       case "cards": await renderCards(); break;
       case "workbench": await renderWorkbench(); break;
@@ -4188,7 +4188,8 @@ async function dailyBlock(seq) {
         row.classList.add("done", verdict);
         ctl.innerHTML = `<span class="triage-done">${verdict === "keep" ? "已留下" : "已跳过"}：${esc(why.value)}</span>`;
         const n = box.querySelector(".daily-head .num");
-        if (n && r && typeof r.done_today === "number") n.textContent = String(r.done_today);
+        // 几行同时交时回来的顺序不定：只往大里改，旧的那个数不能把新的盖小（Codex 复现）
+        if (n && r && typeof r.done_today === "number") n.textContent = String(Math.max(Number(n.textContent) || 0, r.done_today));
       } catch (e) { toast(e.message); keep.disabled = false; skip.disabled = false; why.focus(); }
       sending = false;
     };
@@ -4310,7 +4311,7 @@ async function paintEdges(seq, body) {
     const li = el("li", "", `<span>${edgeChip(e)}<small>${esc(d.kinds[e.kind] || e.kind)}${e.evidence_url ? ` · <a href="${esc(e.evidence_url)}" target="_blank" rel="noopener">凭据 ↗</a>` : ""}</small></span>`);
     const x = el("button", "linkish danger", "删");
     x.type = "button";
-    x.onclick = once(x, async () => { try { await api("DELETE", `/api/edges/${e.id}?uid=${S.uid}`); backToPosition(); } catch (err) { toast(err.message); } });
+    x.onclick = once(x, async () => { try { await api("DELETE", `/api/edges/${e.id}?uid=${S.uid}`); backToPosition(seq); } catch (err) { toast(err.message); } });
     li.appendChild(x);
     ml.appendChild(li);
   });
@@ -4328,7 +4329,7 @@ async function paintEdges(seq, body) {
   const add = el("button", "btn small", "加一条");
   add.type = "button";
   const submit = async (k, t, u) => {
-    try { await api("POST", "/api/edges", { uid: S.uid, kind: k, text: t, evidence_url: u || "" }); backToPosition(); } catch (err) { toast(err.message); }
+    try { await api("POST", "/api/edges", { uid: S.uid, kind: k, text: t, evidence_url: u || "" }); backToPosition(seq); } catch (err) { toast(err.message); }
   };
   add.onclick = once(add, () => submit(kind.value, text.value, url.value));
   text.addEventListener("keydown", (ev) => { if (ev.key === "Enter") add.click(); });
@@ -4395,7 +4396,7 @@ async function paintSources(seq, body) {
         const t = el("button", c.read ? "btn small" : "btn small secondary", c.read ? "✓ 我常看" : "我常看");
         t.type = "button";
         t.onclick = async () => {
-          try { await api("POST", "/api/channels/toggle", { uid: S.uid, id: c.id, on: !c.read, direction: dir }); backToPosition(); } catch (e) { toast(e.message); }
+          try { await api("POST", "/api/channels/toggle", { uid: S.uid, id: c.id, on: !c.read, direction: dir }); backToPosition(seq); } catch (e) { toast(e.message); }
         };
         card.appendChild(t);
         list.appendChild(card);
@@ -4570,8 +4571,9 @@ async function paintStatement(seq, body) {
   check();
 }
 
-/* 定位页里的写操作做完重画定位页；做的过程中人去了别的页，就别把他拉回来（原来一律 setView，Codex 复现） */
-function backToPosition() { if (S.view === "position") setView("position"); }
+/* 定位页里的写操作做完重画定位页——只在还是发起它的那一次渲染时。人去了别的页、或者在定位页里换了一栏
+   （比如去「下注组合」正在填），就不重画：原来一律 setView，刚输入的内容被清掉（Codex 复现） */
+function backToPosition(seq) { if (!stale(seq)) setView("position"); }
 
 /* 按钮的点击在请求回来之前只算一次：原来双击「加上」会建两个同名目标，三个名额一下占满（Codex 复现） */
 function once(btn, run) {
@@ -4604,7 +4606,7 @@ async function paintBets(seq, body) {
       why.placeholder = "一句原因：以后的你和后来的同学都用得上";
       const ok = el("button", "btn small", "记下");
       ok.type = "button";
-      ok.onclick = once(ok, async () => { try { await api("POST", `/api/bets/${t.id}/close`, { uid: S.uid, outcome: out.value, reason: why.value }); backToPosition(); } catch (e) { toast(e.message); } });
+      ok.onclick = once(ok, async () => { try { await api("POST", `/api/bets/${t.id}/close`, { uid: S.uid, outcome: out.value, reason: why.value }); backToPosition(seq); } catch (e) { toast(e.message); } });
       f.append(out, why, ok);
       row.appendChild(f);
     };
@@ -4633,7 +4635,7 @@ async function paintBets(seq, body) {
     niche.innerHTML = '<option value="">子方向（可选）</option>' + kit.open_problems.map((o) => `<option value="${o.id}">${esc(o.niche)}</option>`).join("");
     const add = el("button", "btn small", "加上");
     add.type = "button";
-    add.onclick = once(add, async () => { try { await api("POST", "/api/bets", { uid: S.uid, name: name.value, kind: kind.value, tier: tier.value, kit: S.kitId, niche: niche.value }); backToPosition(); } catch (e) { toast(e.message); } });
+    add.onclick = once(add, async () => { try { await api("POST", "/api/bets", { uid: S.uid, name: name.value, kind: kind.value, tier: tier.value, kit: S.kitId, niche: niche.value }); backToPosition(seq); } catch (e) { toast(e.message); } });
     f.append(name, kind, tier, niche, add);
     panel.appendChild(f);
   }

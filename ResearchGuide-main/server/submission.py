@@ -185,9 +185,24 @@ def _nb_too_big(blob: bytes) -> bool:
     return len(blob) > NB_MAX_BYTES or blob.count(b",") + blob.count(b"[") + blob.count(b"{") > NB_MAX_VALUES
 
 
+RESULT_OUTPUTS = ("stream", "execute_result", "display_data")  # 代码真的跑出了东西；error 不算
+
+
 def _nb_object(pairs: list) -> Any:
-    """只留顶层（有 cells）和单元（有 cell_type）；输出、元数据一律换成占位，哪怕它碰巧也有 source 键。"""
-    return dict(pairs) if any(k == "cells" or k == "cell_type" for k, _ in pairs) else 1
+    """只留顶层（有 cells）和单元（有 cell_type）；输出只留它的 output_type；元数据一律换成占位，哪怕它碰巧也有 source 键。"""
+    if any(k == "cells" or k == "cell_type" for k, _ in pairs):
+        return dict(pairs)
+    for k, v in pairs:
+        if k == "output_type" and isinstance(v, str):
+            return {"output_type": v[:40]}
+    return 1
+
+
+def _cell_has_output(cell: dict) -> bool:
+    """代码单元里有真的运行输出。原来任何单元只要 outputs 不空就算，Markdown 单元上挂一个 outputs 也拿到「有结果」（Codex 复现）。"""
+    outs = cell.get("outputs")
+    return (cell.get("cell_type") == "code" and isinstance(outs, list)
+            and any(isinstance(o, dict) and o.get("output_type") in RESULT_OUTPUTS for o in outs))
 
 
 def _ipynb_text(blob: bytes) -> tuple[str, bool]:
@@ -208,7 +223,7 @@ def _ipynb_text(blob: bytes) -> tuple[str, bool]:
             text = "".join(map(str, src)) if isinstance(src, list) else str(src)
             parts.append(text)
             size += len(text)
-        if cell.get("outputs"):
+        if _cell_has_output(cell):
             has_out = True
     return "\n\n".join(parts), has_out
 

@@ -38,7 +38,7 @@ def write_state(rows: dict[str, str]) -> None:
     STATE.write_text("".join(f"{k}={v}\n" for k, v in old.items()), encoding="utf-8")
 
 
-MODEL_KEYS = ("LLM_BASE_URL", "LLM_MODEL", "LLM_API_KEY", "DEEPSEEK_API_KEY", "OPENAI_API_KEY")
+MODEL_KEYS = ("LLM_BASE_URL", "LLM_MODEL", "LLM_API_KEY", "DEEPSEEK_API_KEY", "OPENAI_API_KEY", "LLM_REASONING_EFFORT")
 
 
 def llm_settings() -> dict[str, str]:
@@ -54,6 +54,8 @@ def llm_settings() -> dict[str, str]:
              "LLM_MODEL": src.get("LLM_MODEL") or "deepseek-flash", "LLM_API_KEY": key}
     if "api.deepseek.com" in group["LLM_BASE_URL"]:
         group["DEEPSEEK_API_KEY"] = key
+    if src.get("LLM_REASONING_EFFORT"):  # 推理强度也是这一组的：不写就清掉，免得留着函数上原来的 max（Codex 复现）
+        group["LLM_REASONING_EFFORT"] = src["LLM_REASONING_EFFORT"]
     return group
 
 

@@ -296,9 +296,8 @@ def wechat_poll(req: WechatPollReq, request: Request):
             uid = store.user_by_openid(openid)["id"]
     if row["consent"]:
         store.record_consent(uid, PRIVACY_VERSION)
-    old = _bearer(request)
-    if old:
-        store.drop_session(old)  # 访客会话换成新会话
+    # 不在这里吊销浏览器原来的令牌：这个结果可能被浏览器当成过期的尝试丢掉（用户已经换了数字或走了访客），
+    # 那时原令牌还得能用。前端真正采用新令牌之后，自己调 /api/auth/logout 吊销旧的。
     return {**account(uid), "token": store.create_session(uid, SESSION_TTL),
             "created": created, "bound": bound, "left_guest": bool(guest_uid and guest_uid != uid)}
 

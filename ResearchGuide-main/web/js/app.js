@@ -59,8 +59,14 @@ function apiUrl(path) { return API_BASE + path; }
    所有请求都走 apiFetch；接口回 401 说明令牌失效了（退出、过期、删号），回到登录页。 */
 function authHeaders(extra) {
   const h = Object.assign({}, extra || {});
-  if (S.token) h.Authorization = `Bearer ${S.token}`;
+  if (S.token && !h.Authorization) h.Authorization = `Bearer ${S.token}`;  // 调用方指定了就用调用方的（吊销旧令牌时）
   return h;
+}
+
+/* 吊销一个已经不用的令牌（比如访客令牌换成微信登录的新令牌之后）。失败也无所谓：它最多三十天后自己过期。 */
+function revokeToken(token) {
+  if (!token) return;
+  apiFetch("/api/auth/logout", { method: "POST", headers: { Authorization: `Bearer ${token}` } }).catch(() => {});
 }
 
 async function apiFetch(path, opt = {}) {
@@ -839,6 +845,8 @@ async function startWechat(box, opts) {
       return;
     }
     stopWxPoll();
+    const previous = S.token;  // 采用新令牌之后再吊销旧的；被当成过期尝试丢掉的结果不会走到这里
+    if (previous && previous !== res.token) revokeToken(previous);
     if (setSession(res, "today", "这个微信已经有账号，已登进去；刚才访客的记录留在访客号里")) return;
     toast(res.bound ? "绑定好了，记录都在" : `你好，${res.nickname}`);
     if (res.bound) { setView("me"); return; }

@@ -362,7 +362,12 @@ def test_guest_binding_wechat_keeps_the_guest_data(client, wx):
                 headers=_h(token))
     r = _wechat_login(client, headers=_h(token))
     assert r["bound"] and r["uid"] == uid and not r["left_guest"]
-    assert client.get("/api/auth/me", headers=_h(token)).status_code == 401  # 访客会话换成了新会话
+    # 轮询不吊销原来的令牌：结果可能被浏览器当成过期尝试丢掉，那时原令牌还得能用
+    assert client.get("/api/auth/me", headers=_h(token)).status_code == 200
+    # 浏览器真正采用新令牌之后自己吊销旧的（app.js 的 revokeToken）
+    assert client.post("/api/auth/logout", headers=_h(token)).status_code == 200
+    assert client.get("/api/auth/me", headers=_h(token)).status_code == 401
+    assert client.get("/api/auth/me", headers=_h(r["token"])).status_code == 200
     edges = client.get(f"/api/edges?uid={uid}", headers=_h(r["token"])).json()
     assert "粤语母语" in str(edges)
 
@@ -576,3 +581,19 @@ def test_qiyan_db_in_the_env_file_is_honoured(tmp_path):
     out = subprocess.run([sys.executable, "-c", "import main, store; print(store.DB_PATH)"], cwd=SERVER,
                          env=env, capture_output=True, text=True, check=True)
     assert out.stdout.strip().splitlines()[-1] == str(target)
+
+
+def test_backup_cli_uses_qiyan_db_from_the_env_file(tmp_path):
+    db = tmp_path / "real.db"
+    with sqlite3.connect(db) as c:
+        c.execute("CREATE TABLE t(x)")
+        c.execute("INSERT INTO t VALUES (42)")
+    envf = tmp_path / ".env"
+    envf.write_text(f"QIYAN_DB={db}\n", encoding="utf-8")
+    env = {k: v for k, v in os.environ.items() if k != "QIYAN_DB"}
+    env["QIYAN_ENV_FILE"] = str(envf)
+    out = subprocess.run([sys.executable, str(SERVER.parent / "tools" / "backup_db.py"), "--out", str(tmp_path / "bk")],
+                         env=env, capture_output=True, text=True, check=True)
+    dest = Path(out.stdout.strip().splitlines()[-1])
+    with sqlite3.connect(dest) as c:
+        assert c.execute("SELECT x FROM t").fetchone()[0] == 42  # 备份的是 .env 指的那个库，不是默认的演示库

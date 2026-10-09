@@ -265,6 +265,7 @@ CREATE TABLE IF NOT EXISTS deleted_users (
 );
 
 CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id);
+CREATE INDEX IF NOT EXISTS idx_submissions_task ON submissions(user_id, task_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_facts_user ON facts(user_id);
 CREATE INDEX IF NOT EXISTS idx_enroll_user ON enrollments(user_id);
 CREATE INDEX IF NOT EXISTS idx_projects_user ON projects(user_id);
@@ -717,11 +718,17 @@ def list_messages(uid: str, conversation_id: str | None = None, limit: int | Non
     if conversation_id is not None:
         q += " AND conversation_id=?"
         args.append(conversation_id)
+    if limit:
+        # 只要最近几条：在 SQL 里取再倒回来。原来把整个历史读进内存再切片，一万条长消息取 12 条要 25 MB、近 100 毫秒（Codex 复现）
+        q += " ORDER BY rowid DESC LIMIT ?"
+        args.append(int(limit))
+        with _conn() as c:
+            rows = c.execute(q, args).fetchall()
+        return [dict(r) for r in reversed(rows)]
     q += " ORDER BY rowid"
     with _conn() as c:
         rows = c.execute(q, args).fetchall()
-    out = [dict(r) for r in rows]
-    return out[-limit:] if limit else out
+    return [dict(r) for r in rows]
 
 
 # ---------- portraits（多份画像；当前份的对话和事实仍写在 live 表里） ----------
@@ -886,6 +893,17 @@ def list_portraits(uid: str) -> list[dict[str, Any]]:
             )
             rows = _portrait_rows(c, uid)
         return _portrait_public(rows)
+
+
+def project_in_portrait(uid: str, pid: str) -> tuple[dict[str, Any] | None, str]:
+    """项目和「现在是哪个画像」在同一个读事务里取：切画像是一个写事务，读到的两样一定属于同一个画像。"""
+    with _conn() as c:
+        c.execute("BEGIN")
+        row = c.execute("SELECT * FROM projects WHERE id=? AND user_id=?", (pid, uid)).fetchone()
+        act = c.execute("SELECT id FROM portraits WHERE user_id=? AND active=1", (uid,)).fetchone()
+    project = ({**json.loads(row["data"]), "id": row["id"], "status": row["status"],
+                "created_at": row["created_at"], "updated_at": row["updated_at"]} if row else None)
+    return project, (act["id"] if act else "")
 
 
 def active_portrait_id(uid: str) -> str:

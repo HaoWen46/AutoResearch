@@ -169,6 +169,30 @@ def message(uid: str, msg: str) -> dict[str, Any]:
     return _turn(reply, nxt_def, state, facts)
 
 
+def advance(uid: str, msg: str) -> dict[str, Any] | None:
+    """模型不可用时给对话内核用：按规则抽取这一轮的回答、推进五轮问答，返回下一问和可点的选项。
+    不写消息（对话内核自己写），已经问完返回 None。
+    原来模型额度用完时，对话只会一遍遍说同一句「先看看你想往哪个方向走」，新同学卡在原地（Codex 复现）。"""
+    state = store.get_onboard_state(uid)
+    phase = state.get("phase") or ROUNDS[0]["id"]
+    if phase == "done":
+        return None
+    idx = _ROUND_INDEX.get(phase, 0)
+    round_def = ROUNDS[idx]
+    if msg.strip():
+        _extract(uid, round_def, msg)
+    nxt = _TRANSITIONS.get(phase) or (ROUNDS[idx + 1]["id"] if idx + 1 < len(ROUNDS) else "done")
+    if nxt == "done":
+        store.set_onboard_state(uid, {**state, "phase": "done", "round_no": idx + 1})
+        return {"reply": "五个问题聊完了。刚才记下的几条在「核对」页，说得不对可以改；"
+                         "然后去「方向」页挑一个方向，我按它给你排第一件二十分钟的小事。",
+                "options": [], "done": True}
+    store.set_onboard_state(uid, {**state, "phase": nxt, "round_no": idx + 2})
+    nxt_def = ROUNDS[_ROUND_INDEX[nxt]]
+    return {"reply": f"{_ACK.get(phase, '')}{nxt_def['ask']}",
+            "options": [o["label"] for o in nxt_def["options"]], "done": False}
+
+
 def _turn(reply: str, round_def: dict[str, Any], state: dict[str, Any],
           facts: list[UserFact] | None = None) -> dict[str, Any]:
     return {

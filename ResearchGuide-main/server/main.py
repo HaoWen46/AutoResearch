@@ -952,7 +952,10 @@ def _review_and_record(uid: str, p: dict, data: bytes, portrait: str = "") -> di
 async def project_submit(pid: str, uid: str, request: Request):
     """请求体就是 .zip 本身（Content-Type: application/zip），不需要 multipart 依赖。"""
     global _review_pending, _uploads
+    # 项目和「当时是哪个画像」在收上传之前、同一个读事务里拿：原来是传完之后才看画像，
+    # 上传期间切了画像，评阅就记进新画像（Codex 复现）。不用这个人的锁：同时交几份时不该互相 409。
     p = await run_in_threadpool(_project_or_404, uid, pid)
+    _, portrait = await run_in_threadpool(store.project_in_portrait, uid, pid)
     if _uploads >= UPLOADS_MAX or _review_pending >= REVIEW_PENDING_MAX:
         raise HTTPException(503, "现在交的人太多，评阅在排队。请过一两分钟再交。")
     _uploads += 1
@@ -968,7 +971,6 @@ async def project_submit(pid: str, uid: str, request: Request):
     try:
         # run_in_executor 不带上下文变量：不包一层，评阅里的模型调用就不知道算在谁头上（budget.py）
         ctx = contextvars.copy_context()
-        portrait = await run_in_threadpool(store.active_portrait_id, uid)
         return await asyncio.get_running_loop().run_in_executor(_REVIEW_POOL, ctx.run, _review_and_record, uid, p, data,
                                                                 portrait)
     finally:

@@ -651,22 +651,24 @@ def _degraded_proposal(uid: str, message: str, env: dict[str, Any]) -> dict[str,
     然后按「还没方向就给方向、有方向没事做就给任务」给出下一步。这样不配 key 也能跑通全链路。
     """
     ops: list[dict[str, Any]] = []
-    try:
-        import onboarding
-        state = store.get_onboard_state(uid)
-        round_id = state.get("phase")
-        round_def = next((r for r in onboarding.ROUNDS if r["id"] == round_id), None)
-        if round_def:
-            matched = next((o for o in round_def["options"] if o["label"] == message), None)
-            tag = matched["tag"] if matched else None
-            spec = onboarding._TAG_FACTS.get(tag) if tag else None
-            if spec:
-                ops.append({"op": "add", "key": spec[1], "value": spec[2],
-                            "evidence_quote": message, "source": spec[3]})
-    except Exception:
-        pass
-
     plan = env.get("active_plan") or {}
+    if not plan.get("direction") and not env.get("lib_facts"):
+        # 还没方向、模型又不可用：走规则版五问（会推进、会给可点的选项），不要一遍遍问同一句。
+        # 他这句话里说到了院系/专业时例外：先用本地知识库答他（下面那条分支）
+        import onboarding
+        step = onboarding.advance(uid, message)
+        if step is not None:
+            return {
+                "understanding": {"gist": message[:120], "signals": [], "corrections": []},
+                "memory_ops": [],  # 这一轮的回答已经由规则版记成待核对的条目
+                "tool_intent": None,
+                "dialogue": {"move": "clarify", "reason": "规则降级：模型不可用，走固定的五问",
+                             "reply": step["reply"],
+                             "offered_actions": [{"id": f"o{i}", "label": label}
+                                                 for i, label in enumerate(step["options"])]},
+                "next_action": None,
+            }
+
     # 规则版也要过个性化闸门：把依据挂到当前生效的方向事实上。
     dir_id = next((f["id"] for f in env.get("recalled_memory") or []
                    if str(f.get("key", "")).startswith("direction:")), None)
@@ -683,7 +685,9 @@ def _degraded_proposal(uid: str, message: str, env: dict[str, Any]) -> dict[str,
                  f"\n（这一轮模型不可用，名单是本地知识库返回的原文。）")
         move, next_action = "answer", None
     elif not plan.get("direction"):
-        move, reply = "clarify", "先看看你更想往哪个方向走：把你现在最想弄清楚的一个问题说给我，我据此给几个可选方向。"
+        # 五问已经问完、还没选方向：指到能选方向的地方，而不是再问一遍
+        move, reply = "clarify", ("模型这会儿不可用。去「方向」页挑一个方向（不确定就先去「核对」页看看我记下的几条），"
+                                  "选好之后我按规则给你排第一件二十分钟的小事。")
         next_action = None
     elif not plan.get("pending_action") and dir_id:
         move, reply = "propose_action", "先做一件二十分钟能收尾的小事，比继续看介绍有用。"

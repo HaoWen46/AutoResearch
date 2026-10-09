@@ -15,6 +15,7 @@ import json
 import re
 import struct
 import zipfile
+import zlib
 from typing import Any
 
 import llm
@@ -264,31 +265,35 @@ def read_zip(data: bytes) -> dict[str, Any]:
         item = {"path": path, "size": info.file_size, "kind": kind}
         low = path.lower()
         # 每个文件读完就截到上限再存，不把几十 MB 的完整正文攒到最后才截
-        if kind in ("readme", "doc", "code", "notebook") or low.endswith((".csv", ".tsv", ".json")):
-            if low.endswith((".doc", ".pptx")):
-                notes.append(f"「{path}」是 {low.rsplit('.', 1)[-1]} 格式，没有读取正文；关键内容请写进 README。")
-            elif low.endswith(".docx"):  # 本身是压缩包，要整份；单个文件已限 20 MB
-                texts[path] = _docx_text(z.read(info))
-                if not texts[path]:
-                    notes.append(f"「{path}」读不出正文（文件损坏或解压后过大），关键内容请写进 README。")
-            elif low.endswith(".ipynb"):  # JSON 要整份才能解析
-                blob = z.read(info)
-                if _nb_too_big(blob):
-                    texts[path] = ""
-                    item["has_outputs"] = False  # 没解析就不算「有输出」：猜出来的证据不能给分
-                    notes.append(f"「{path}」太大或输出太多，没有读取，也不计入「有输出」。请清空输出（Kernel → Restart & Clear Output）后再交，"
-                                 "并把结果导出到 results/、在 README 里写明。")
+        try:
+            if kind in ("readme", "doc", "code", "notebook") or low.endswith((".csv", ".tsv", ".json")):
+                if low.endswith((".doc", ".pptx")):
+                    notes.append(f"「{path}」是 {low.rsplit('.', 1)[-1]} 格式，没有读取正文；关键内容请写进 README。")
+                elif low.endswith(".docx"):  # 本身是压缩包，要整份；单个文件已限 20 MB
+                    texts[path] = _docx_text(z.read(info))
+                    if not texts[path]:
+                        notes.append(f"「{path}」读不出正文（文件损坏或解压后过大），关键内容请写进 README。")
+                elif low.endswith(".ipynb"):  # JSON 要整份才能解析
+                    blob = z.read(info)
+                    if _nb_too_big(blob):
+                        texts[path] = ""
+                        item["has_outputs"] = False  # 没解析就不算「有输出」：猜出来的证据不能给分
+                        notes.append(f"「{path}」太大或输出太多，没有读取，也不计入「有输出」。请清空输出（Kernel → Restart & Clear Output）后再交，"
+                                     "并把结果导出到 results/、在 README 里写明。")
+                    else:
+                        txt, has_out = _ipynb_text(blob)
+                        texts[path] = txt[:MAX_TEXT_CHARS]
+                        item["has_outputs"] = has_out
+                    del blob
+                elif low.endswith((".csv", ".tsv")):  # 只看前 12 行
+                    blob, cut = _head(z, info, 64 * 1024)
+                    texts[path] = "\n".join(_text(blob, cut).splitlines()[:12])
                 else:
-                    txt, has_out = _ipynb_text(blob)
-                    texts[path] = txt[:MAX_TEXT_CHARS]
-                    item["has_outputs"] = has_out
-                del blob
-            elif low.endswith((".csv", ".tsv")):  # 只看前 12 行
-                blob, cut = _head(z, info, 64 * 1024)
-                texts[path] = "\n".join(_text(blob, cut).splitlines()[:12])
-            else:
-                blob, cut = _head(z, info, MAX_TEXT_CHARS * 4)  # UTF-8 一个字最多 4 字节
-                texts[path] = _text(blob, cut)[:MAX_TEXT_CHARS]
+                    blob, cut = _head(z, info, MAX_TEXT_CHARS * 4)  # UTF-8 一个字最多 4 字节
+                    texts[path] = _text(blob, cut)[:MAX_TEXT_CHARS]
+        except (zipfile.BadZipFile, zlib.error, EOFError, OSError, NotImplementedError):
+            # 目录记录完好、成员数据坏了（CRC 不对、压缩方式不支持）要在这里拦下，不然一路抛成 500
+            raise SubmissionError(f"压缩包里的「{name}」读不出来（文件损坏或用了不支持的压缩方式），请重新打包再交。")
         if low.endswith(".pdf"):
             notes.append(f"「{path}」是 PDF，没有读取正文，只算作一个结果文件。")
         item["empty"] = info.file_size == 0
@@ -334,14 +339,17 @@ def _path_tokens(text: str) -> set[str]:
 
 def _referenced_paths(text: str, inventory: list[dict[str, Any]]) -> tuple[list[str], list[str]]:
     paths = {i["path"] for i in inventory}
-    names = {p.rsplit("/", 1)[-1]: p for p in paths}
+    names: dict[str, list[str]] = {}
+    for p in paths:
+        names.setdefault(p.rsplit("/", 1)[-1], []).append(p)
     found, missing = [], []
     for tok in _path_tokens(text):
-        tok = tok.lstrip("./")
+        tok = re.sub(r"/+", "/", tok).lstrip("./")
         if tok in paths:
             found.append(tok)
-        elif tok.rsplit("/", 1)[-1] in names:
-            found.append(names[tok.rsplit("/", 1)[-1]])
+        elif "/" not in tok and len(names.get(tok, [])) == 1:
+            # 带目录的引用必须路径完全对上（写 results/ 实际在 data/ 算没找到）；只写文件名时，同名文件唯一才认
+            found.append(names[tok][0])
         elif not tok.lower().startswith("readme"):
             missing.append(tok)
     return sorted(set(found)), sorted(set(missing))
@@ -366,7 +374,8 @@ def rule_checks(bundle: dict[str, Any], project: dict[str, Any]) -> dict[str, An
     caps = {
         # 规则能确定的上限：模型只能在这个范围内往下判
         "problem": status(bool(readme) and sec["problem"] and len(readme) >= 80, bool(readme)),
-        "results": status(bool(results) and bool(found), bool(results) or notebook_out),
+        # README 引用的文件里至少有一个是结果文件才算 pass：只引用代码、结果文件没人提，不能给满
+        "results": status(bool(set(found) & {i["path"] for i in results}), bool(results) or notebook_out),
         "match": "pass" if readme else "partial",
         "check": status((bool(code) and sec["reproduce"]) or (not code and bool(docs or results) and sec["done"]), bool(code) or sec["reproduce"] or sec["done"]),
         "limits": status(sec["limits"]),

@@ -17,6 +17,7 @@ from __future__ import annotations
 from typing import Any
 
 import llm
+import memory
 import store
 from pku_adapter import search_courses
 from schemas import DECISION_STATUSES, NBA, UserFact
@@ -349,5 +350,7 @@ def choose_direction(uid: str, code: str) -> UserFact:
         evidence=[{"type": "card_selection", "direction": code, "quote": quote}],
         status="confirmed",
     )
+    # 先撤掉旧方向再记新的：原来两条都留着，前端按最新的显示、规划和对话按最早的走（Codex 复现：选了数学还在出 AI 的任务）
+    memory._supersede_existing(uid, f.key, memory._NAMESPACED["direction"], keep=None, decision_id="card_selection")
     store.add_fact(f)
     return f

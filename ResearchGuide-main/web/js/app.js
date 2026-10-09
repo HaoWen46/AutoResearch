@@ -215,8 +215,14 @@ const WORKSPACE = {
 
 /* ---------- 视图切换 ---------- */
 
+/* 刷新停在原来那一栏：记在这个标签页的 sessionStorage（新开标签页照样从首页进）。
+   原来已登录的学生一刷新就回到粒子首页（Codex 复现）。要 id 的详情页回到它所在的栏目。 */
+const RESUMABLE = { today: "today", workbench: "workbench", projects: "projects", project: "projects", read: "read",
+  card: "read", position: "position", dialogue: "dialogue", confirm: "confirm", me: "me", cards: "cards" };
+
 function setView(name) {
   S.view = name;
+  try { if (S.uid && RESUMABLE[name]) sessionStorage.setItem("rg_last_view", RESUMABLE[name]); } catch (_) { /* 无痕模式等 */ }
   if (name === "dialogue" || name === "confirm") S.portraitTab = name;
   document.body.dataset.view = name;
   const home = name === "home";
@@ -246,23 +252,30 @@ function stale(seq) {
 }
 
 async function render() {
-  S.renderSeq = (S.renderSeq || 0) + 1;
+  const seq = S.renderSeq = (S.renderSeq || 0) + 1;
   if (S.view === "home") { renderHome(); return; }
   if (!S.uid && S.view !== "login") { renderLogin(); return; }
-  switch (S.view) {
-    case "login": renderLogin(); break;
-    case "dialogue": ChatView.render($app); break;
-    case "confirm": await renderConfirm(); break;
-    case "cards": await renderCards(); break;
-    case "workbench": await renderWorkbench(); break;
-    case "projects": await renderProjects(); break;
-    case "project": await renderProject(); break;
-    case "position": await renderPosition(); break;
-    case "read": await renderRead(); break;
-    case "card": await renderCard(); break;
-    case "me": await renderMe(); break;
-    case "today":
-    default: await renderToday(); break;
+  try {
+    switch (S.view) {
+      case "login": renderLogin(); break;
+      case "dialogue": ChatView.render($app); break;
+      case "confirm": await renderConfirm(); break;
+      case "cards": await renderCards(); break;
+      case "workbench": await renderWorkbench(); break;
+      case "projects": await renderProjects(); break;
+      case "project": await renderProject(); break;
+      case "position": await renderPosition(); break;
+      case "read": await renderRead(); break;
+      case "card": await renderCard(); break;
+      case "me": await renderMe(); break;
+      case "today":
+      default: await renderToday(); break;
+    }
+  } catch (e) {
+    // 这一页要的数据没取到：原来变成没人接的 Promise 错误，菜单关了、页面却还停在上一页，也没有提示（Codex 复现）
+    if (stale(seq)) return;
+    $app.innerHTML = "";
+    $app.appendChild(emptyPanel(`这一页没打开：${esc((e && e.message) || e)}`, "再试一次", S.view));
   }
 }
 
@@ -1727,9 +1740,11 @@ function paintChrome() {
   chip.classList.toggle("empty", !name);
 }
 
+let menuSeq = 0;  // 菜单每开、关一次加一：画像列表回来时菜单已经关了（或者换了一个），就别再往里塞
+
 function closeUserMenu() {
-  const menu = document.getElementById("userMenu");
-  if (menu) menu.remove();
+  menuSeq += 1;
+  document.querySelectorAll("#userMenu").forEach((m) => m.remove());
   const btn = document.getElementById("userMenuBtn");
   if (btn) btn.setAttribute("aria-expanded", "false");
 }
@@ -1739,18 +1754,14 @@ async function openUserMenu() {
   const btn = document.getElementById("userMenuBtn");
   if (!wrap || !btn || !S.uid) return;
   if (document.getElementById("userMenu")) { closeUserMenu(); return; }
+  const mine = ++menuSeq;
   btn.setAttribute("aria-expanded", "true");
   const menu = el("div", "user-menu");
   menu.id = "userMenu";
   menu.setAttribute("role", "menu");
   menu.appendChild(el("p", "user-menu-kicker", "你的档案"));
-  try {
-    const bar = await portraitBar();
-    bar.classList.add("user-menu-portraits");
-    menu.appendChild(bar);
-  } catch (e) {
-    menu.appendChild(el("p", "form-note", e.message || "画像列表没加载出来"));
-  }
+  const slot = el("p", "form-note", "正在取画像…");
+  menu.appendChild(slot);
   const go = (label, view) => {
     const b = el("button", "user-menu-item", label);
     b.type = "button";
@@ -1758,10 +1769,21 @@ async function openUserMenu() {
     b.onclick = () => { closeUserMenu(); setView(view); };
     return b;
   };
-  menu.appendChild(go("继续聊", S.portraitTab || "dialogue"));
+  // 「继续聊」就是去对话：原来沿用上次停在的那一格，去过核对页之后点它进的是核对（Codex 复现）
+  menu.appendChild(go("继续聊", "dialogue"));
   menu.appendChild(go("核对这些记录", "confirm"));
   menu.appendChild(go("它记下的", "me"));
+  // 先把菜单放上去再等画像列表：原来等完才放，列表没回来时再点一次按钮会叠出第二个菜单，关掉一个还剩一个（Codex 复现）
   wrap.appendChild(menu);
+  try {
+    const bar = await portraitBar();
+    if (mine !== menuSeq || !menu.isConnected) return;
+    bar.classList.add("user-menu-portraits");
+    slot.replaceWith(bar);
+  } catch (e) {
+    if (mine !== menuSeq || !menu.isConnected) return;
+    slot.textContent = (e && e.message) || "画像列表没加载出来";
+  }
 }
 
 /* ---------- 画像切换 ---------- */
@@ -2364,6 +2386,10 @@ async function portraitOp(run, nextView) {
     const active = ((r && r.portraits) || []).find((item) => item.active);
     S.portraitId = active ? active.id : "";
     S.myDir = undefined;  // 方向是画像的：换了画像要重新问（原来切到数学画像，研读和信息源还按 AI 提示，Codex 复现）
+    // 下面这些也都属于上一份画像：项目表单（方向、阶段、关键词）和搜到的项目、打开的项目和任务、定位陈述草稿、
+    // 方向树上点着的节点。原来切到数学画像，项目表单还停在 AI、第 6 步和旧关键词（Codex 复现）
+    Object.assign(S, { projectForm: null, projectResult: null, projectKeywords: "", projectId: "",
+      openTaskId: "", posDraft: null, dirPicked: null });
     setView(nextView);
   } catch (e) {
     toast(e.message);
@@ -3363,8 +3389,9 @@ async function renderWorkbench() {
   const seq = S.renderSeq;
   await ensurePortrait();
   if (stale(seq)) return;
+  let tasksFailed = false;
   const [taskRes, onboard] = await Promise.all([
-    api("GET", `/api/tasks?uid=${S.uid}`).catch(() => ({ tasks: [] })),
+    api("GET", `/api/tasks?uid=${S.uid}`).catch(() => { tasksFailed = true; return { tasks: [] }; }),
     api("GET", `/api/onboard/result?uid=${S.uid}`).catch(() => null),
   ]);
   if (stale(seq)) return;
@@ -3372,6 +3399,11 @@ async function renderWorkbench() {
   const wrap = el("div", "stagger");
   wrap.appendChild(workspaceHead("作业", "现在该交的放这里。做完交上去，按事先说好的几条对一下。"));
   $app.appendChild(wrap);
+  if (tasksFailed) {
+    // 没取到不等于没有：原来当成空列表往下走，进度被对成「没做过」、当前节点又生成一份新作业，做完的变回没做（Codex 复现）
+    wrap.appendChild(emptyPanel("作业列表这次没取到（网络或服务器忙），已经做过的都还在。", "再试一次", "workbench"));
+    return;
+  }
 
   const listed = taskRes.tasks || [];
 
@@ -3696,9 +3728,11 @@ async function renderToday() {
   card.appendChild(act);
   wrap.appendChild(card);
   $app.appendChild(wrap);
-  // 服务端的下一步建议不知道项目的状态：本地已经给了「交成果 / 再改一处」时别拿它盖掉（原来按钮被换成普通作业，Codex 复现）
-  const projectFirst = !!field && !!(toFix || toSubmit);
-  if (!projectFirst && ((talked && drafts === 0) || field)) {
+  // 服务端的下一步建议不知道项目和教程走到了哪：本地已经算出具体的下一步（交成果、再改一处、找项目、教程走完）时别拿它盖掉，
+  // 只在「还没方向」和「继续当前节点」这两种时让它补措辞和理由。原来按钮被换成普通作业，
+  // 交过三次作业后「找一个真题练手」也被换成第 2 个微任务、点进去是已经做完的节点（Codex 复现）
+  const nbaOk = field ? (!toFix && !toSubmit && doneTasks < PROJECT_AFTER_TASKS && !!node) : (talked && drafts === 0);
+  if (nbaOk) {
     api("POST", "/api/nba", { uid: S.uid }).then((nba) => {
       if (stale(seq) || !nba || !nba.title || !nba.rationale) return;
       card.querySelector(".nba-title").textContent = nba.title;
@@ -4142,14 +4176,21 @@ async function dailyBlock(seq) {
     const why = el("input");
     why.placeholder = "为什么（一句，≤30 字）：碰到了什么 / 离你的问题多远";
     why.maxLength = 80;
+    let sending = false;
     const send = async (verdict) => {
+      // 请求回来之前这一行只算一次；今天分拣了几篇用服务器回的数，不自己加。
+      // 原来慢的时候双击「留」显示完成 2 篇，库里只有 1 篇（Codex 复现）
+      if (sending || row.classList.contains("done")) return;
+      sending = true;
+      keep.disabled = true; skip.disabled = true;
       try {
-        await api("POST", "/api/daily/triage", { uid: S.uid, kit: d.kit.id, arxiv_id: it.arxiv_id, verdict, why: why.value, title: it.title });
+        const r = await api("POST", "/api/daily/triage", { uid: S.uid, kit: d.kit.id, arxiv_id: it.arxiv_id, verdict, why: why.value, title: it.title });
         row.classList.add("done", verdict);
         ctl.innerHTML = `<span class="triage-done">${verdict === "keep" ? "已留下" : "已跳过"}：${esc(why.value)}</span>`;
         const n = box.querySelector(".daily-head .num");
-        if (n) n.textContent = String(Number(n.textContent) + 1);
-      } catch (e) { toast(e.message); why.focus(); }
+        if (n && r && typeof r.done_today === "number") n.textContent = String(r.done_today);
+      } catch (e) { toast(e.message); keep.disabled = false; skip.disabled = false; why.focus(); }
+      sending = false;
     };
     const keep = el("button", "btn small", "留");
     keep.type = "button";
@@ -4269,7 +4310,7 @@ async function paintEdges(seq, body) {
     const li = el("li", "", `<span>${edgeChip(e)}<small>${esc(d.kinds[e.kind] || e.kind)}${e.evidence_url ? ` · <a href="${esc(e.evidence_url)}" target="_blank" rel="noopener">凭据 ↗</a>` : ""}</small></span>`);
     const x = el("button", "linkish danger", "删");
     x.type = "button";
-    x.onclick = async () => { try { await api("DELETE", `/api/edges/${e.id}?uid=${S.uid}`); setView("position"); } catch (err) { toast(err.message); } };
+    x.onclick = once(x, async () => { try { await api("DELETE", `/api/edges/${e.id}?uid=${S.uid}`); backToPosition(); } catch (err) { toast(err.message); } });
     li.appendChild(x);
     ml.appendChild(li);
   });
@@ -4287,9 +4328,9 @@ async function paintEdges(seq, body) {
   const add = el("button", "btn small", "加一条");
   add.type = "button";
   const submit = async (k, t, u) => {
-    try { await api("POST", "/api/edges", { uid: S.uid, kind: k, text: t, evidence_url: u || "" }); setView("position"); } catch (err) { toast(err.message); }
+    try { await api("POST", "/api/edges", { uid: S.uid, kind: k, text: t, evidence_url: u || "" }); backToPosition(); } catch (err) { toast(err.message); }
   };
-  add.onclick = () => submit(kind.value, text.value, url.value);
+  add.onclick = once(add, () => submit(kind.value, text.value, url.value));
   text.addEventListener("keydown", (ev) => { if (ev.key === "Enter") add.click(); });
   form.append(kind, text, url, add);
   intro.appendChild(form);
@@ -4354,7 +4395,7 @@ async function paintSources(seq, body) {
         const t = el("button", c.read ? "btn small" : "btn small secondary", c.read ? "✓ 我常看" : "我常看");
         t.type = "button";
         t.onclick = async () => {
-          try { await api("POST", "/api/channels/toggle", { uid: S.uid, id: c.id, on: !c.read, direction: dir }); setView("position"); } catch (e) { toast(e.message); }
+          try { await api("POST", "/api/channels/toggle", { uid: S.uid, id: c.id, on: !c.read, direction: dir }); backToPosition(); } catch (e) { toast(e.message); }
         };
         card.appendChild(t);
         list.appendChild(card);
@@ -4516,14 +4557,29 @@ async function paintStatement(seq, body) {
   sel.addEventListener("change", () => { state.x_ref = sel.value; keep(); paintQuote(); check(); });
   save.onclick = async () => {
     save.disabled = true;
+    const sent = JSON.stringify(state);  // 这次交的是哪一版
     try {
       await api("POST", "/api/statement", { uid: S.uid, kit: S.kitId, x_ref: state.x_ref, x_text: state.x_text, y: state.y });
-      S.posDraft = null;
-      toast("已保存");
-      setView("position");
-    } catch (e) { toast(e.message); save.disabled = false; }
+      // 保存期间离开再回来接着改了：只清掉这次交的那一版，后来写的留着；人已经去了别的页就别拉回来（原来两样都直接做，Codex 复现）
+      const later = S.posDraft && JSON.stringify(S.posDraft) !== sent;
+      if (!later) S.posDraft = null;
+      toast(later ? "已保存；之后改的还在草稿里" : "已保存");
+      if (!stale(seq)) setView("position");
+    } catch (e) { toast(e.message); if (!stale(seq)) save.disabled = false; }
   };
   check();
+}
+
+/* 定位页里的写操作做完重画定位页；做的过程中人去了别的页，就别把他拉回来（原来一律 setView，Codex 复现） */
+function backToPosition() { if (S.view === "position") setView("position"); }
+
+/* 按钮的点击在请求回来之前只算一次：原来双击「加上」会建两个同名目标，三个名额一下占满（Codex 复现） */
+function once(btn, run) {
+  return async (...args) => {
+    if (btn.disabled) return;
+    btn.disabled = true;
+    try { await run(...args); } finally { btn.disabled = false; }
+  };
 }
 
 async function paintBets(seq, body) {
@@ -4548,7 +4604,7 @@ async function paintBets(seq, body) {
       why.placeholder = "一句原因：以后的你和后来的同学都用得上";
       const ok = el("button", "btn small", "记下");
       ok.type = "button";
-      ok.onclick = async () => { try { await api("POST", `/api/bets/${t.id}/close`, { uid: S.uid, outcome: out.value, reason: why.value }); setView("position"); } catch (e) { toast(e.message); } };
+      ok.onclick = once(ok, async () => { try { await api("POST", `/api/bets/${t.id}/close`, { uid: S.uid, outcome: out.value, reason: why.value }); backToPosition(); } catch (e) { toast(e.message); } });
       f.append(out, why, ok);
       row.appendChild(f);
     };
@@ -4577,7 +4633,7 @@ async function paintBets(seq, body) {
     niche.innerHTML = '<option value="">子方向（可选）</option>' + kit.open_problems.map((o) => `<option value="${o.id}">${esc(o.niche)}</option>`).join("");
     const add = el("button", "btn small", "加上");
     add.type = "button";
-    add.onclick = async () => { try { await api("POST", "/api/bets", { uid: S.uid, name: name.value, kind: kind.value, tier: tier.value, kit: S.kitId, niche: niche.value }); setView("position"); } catch (e) { toast(e.message); } };
+    add.onclick = once(add, async () => { try { await api("POST", "/api/bets", { uid: S.uid, name: name.value, kind: kind.value, tier: tier.value, kit: S.kitId, niche: niche.value }); backToPosition(); } catch (e) { toast(e.message); } });
     f.append(name, kind, tier, niche, add);
     panel.appendChild(f);
   }
@@ -4675,15 +4731,21 @@ async function renderProjects() {
   const seq = S.renderSeq;
   await ensurePortrait();
   if (stale(seq)) return;
+  let mineFailed = false;
   const [ctx, mine] = await Promise.all([
     api("GET", `/api/projects/context?uid=${S.uid}`).catch(() => null),
-    api("GET", `/api/projects/mine?uid=${S.uid}`).catch(() => ({ projects: [] })),
+    api("GET", `/api/projects/mine?uid=${S.uid}`).catch(() => { mineFailed = true; return { projects: [] }; }),
   ]);
   if (stale(seq)) return;
   const tab = S.projectTab || "find";
   $app.innerHTML = "";
   $app.appendChild(workspaceHead("项目", "课堂作业练一个点。这里找一个公开真题，把点连起来，交一个压缩包。"));
   $app.appendChild(projectTabs(tab, (mine.projects || []).length));
+  if (tab === "mine" && mineFailed) {
+    // 没取到不是没有：原来显示成「还没选项目」，选过的项目像是丢了（Codex 复现）
+    $app.appendChild(emptyPanel("「我的项目」这次没取到（网络或服务器忙），选过的都还在。", "再试一次", "projects"));
+    return;
+  }
   if (tab === "mine") { renderMine(mine.projects || []); return; }
   if (tab === "sources") { renderSources(); return; }
 
@@ -5255,7 +5317,7 @@ document.addEventListener("click", (e) => {
   }
   let next = "home", note = "";
   try {
-    next = sessionStorage.getItem("rg_next_view") || "home";
+    next = sessionStorage.getItem("rg_next_view") || sessionStorage.getItem("rg_last_view") || "home";
     note = sessionStorage.getItem("rg_toast") || "";
     sessionStorage.removeItem("rg_next_view");
     sessionStorage.removeItem("rg_toast");

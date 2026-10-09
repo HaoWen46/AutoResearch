@@ -1231,8 +1231,10 @@ body.is-home .site-footer { display: none; }
   .page { padding-top: var(--gap-5); }
   .ws-head h2 { font-size: 26px; }
   .panel { padding: var(--gap-4); }
-  /* :has(> .chat-wide) 那条比 .two-col 更具体：只写 .two-col 的话对话页在手机上还是左右两列，对话列只剩几个字宽 */
-  .two-col, .two-col:has(> .chat-wide) { grid-template-columns: 1fr; }
+  .two-col { grid-template-columns: 1fr; }
+  /* :has(> .chat-wide) 那条比 .two-col 更具体：只写 .two-col 的话对话页在手机上还是左右两列，对话列只剩几个字宽。
+     单独一条，不跟上面合写：不认 :has() 的浏览器会把整条逗号规则丢掉，连 .two-col 的单列也没了 */
+  .two-col:has(> .chat-wide) { grid-template-columns: 1fr; }
   .two-col-chat > .side-panel { max-height: none; }
   /* 窄屏：不要 fixed 高度的对话面板。页面本身会滚，
      面板再限高会让输入框被挤在一个小格子里。 */

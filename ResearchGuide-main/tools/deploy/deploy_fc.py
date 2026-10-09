@@ -38,11 +38,23 @@ def write_state(rows: dict[str, str]) -> None:
     STATE.write_text("".join(f"{k}={v}\n" for k, v in old.items()), encoding="utf-8")
 
 
-def llm_key() -> str:
+MODEL_KEYS = ("LLM_BASE_URL", "LLM_MODEL", "LLM_API_KEY", "DEEPSEEK_API_KEY", "OPENAI_API_KEY")
+
+
+def llm_settings() -> dict[str, str]:
+    """本机要发上去的模型设置：地址、模型、密钥一整组。本机没有密钥就返回空——函数上现有的那组原样保留。
+    只换密钥不换地址会配错：函数上用的是别家的地址，本机留着 DeepSeek 的密钥，发版之后模型就认证失败（Codex 复现）。"""
     app_env = load_env(Path(__file__).resolve().parents[2] / ".env")
     root_env = load_env()
-    return (app_env.get("LLM_API_KEY") or root_env.get("DEEPSEEK_API_KEY")
-            or root_env.get("LLM_API_KEY") or "")
+    src = app_env if app_env.get("LLM_API_KEY") else root_env
+    key = src.get("LLM_API_KEY") or src.get("DEEPSEEK_API_KEY") or ""
+    if not key:
+        return {}
+    group = {"LLM_BASE_URL": src.get("LLM_BASE_URL") or "https://api.deepseek.com/v1",
+             "LLM_MODEL": src.get("LLM_MODEL") or "deepseek-flash", "LLM_API_KEY": key}
+    if "api.deepseek.com" in group["LLM_BASE_URL"]:
+        group["DEEPSEEK_API_KEY"] = key
+    return group
 
 
 def existing_env(cli: Client, name: str) -> dict[str, str]:
@@ -82,18 +94,18 @@ def main() -> None:
     current = existing_env(cli, name)
     db_name = (env.get("QIYAN_DB") or current.get("QIYAN_DB")
                or ("/tmp/qiyan-test.db" if name != DEFAULT_NAME else "/tmp/qiyan.db"))
+    local_llm = llm_settings()
+    if local_llm:  # 整组换成本机的；本机没有就整组留函数上的
+        current = {k: v for k, v in current.items() if k not in MODEL_KEYS}
     env_vars = {
+        "LLM_BASE_URL": "https://api.deepseek.com/v1",
+        "LLM_MODEL": "deepseek-flash",
         **current,
+        **local_llm,
         "QIYAN_DB": db_name,
-        "LLM_BASE_URL": current.get("LLM_BASE_URL") or "https://api.deepseek.com/v1",
-        "LLM_MODEL": current.get("LLM_MODEL") or "deepseek-flash",
         "QIYAN_ENV": "test" if name != DEFAULT_NAME else "prod",
     }
-    print("QIYAN_DB", db_name)
-    key = llm_key()
-    if key:
-        env_vars["LLM_API_KEY"] = key
-        env_vars["DEEPSEEK_API_KEY"] = key
+    print("QIYAN_DB", db_name, "MODEL", env_vars["LLM_MODEL"], "KEY", "local" if local_llm else ("kept" if env_vars.get("LLM_API_KEY") else "none"))
     body = fc.CreateFunctionInput(
         function_name=name,
         runtime="custom.debian12",

@@ -14,6 +14,7 @@ schema 不变：{chosen, rationale, alternatives[2], confidence}。
 """
 from __future__ import annotations
 
+import math
 from typing import Any
 
 import llm
@@ -292,8 +293,12 @@ def _voice_cards(cards: list[dict[str, Any]], facts: list[UserFact], quotes: dic
     for item in items:
         if not isinstance(item, dict):
             continue
+        raw = item.get("index")
+        # 取整前先查是有限数：原来 1e309 读成 inf，int(inf) 抛 OverflowError，方向卡接口 500（Codex 复现）
+        if isinstance(raw, float) and not math.isfinite(raw):
+            continue
         try:
-            idx = int(item.get("index"))
+            idx = int(raw)
         except (TypeError, ValueError):
             continue
         why = str(item.get("why") or "").strip()

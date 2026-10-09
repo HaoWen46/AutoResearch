@@ -422,6 +422,33 @@ def support_ratio(value: str, quote: str) -> float:
     return len(v & _content_chars(quote)) / len(v)
 
 
+# 年级的说法：「大二」「本科二年级」是同一个（本科, 2）；「博士」是（博士, 不知第几年）。
+_GRADE_RE = re.compile(r"(本科|硕士|研究生|博士|高中)?(?:([大研硕博高])([一二三四五六1-6])|([一二三四五六1-6])年级)"
+                       r"|(本科|硕士|研究生|博士|高中)")
+_GRADE_STAGE = {"本科": "本", "大": "本", "硕士": "硕", "研究生": "硕", "研": "硕", "硕": "硕",
+                "博士": "博", "博": "博", "高中": "高", "高": "高"}
+_GRADE_YEAR = {c: i + 1 for i, c in enumerate("一二三四五六")} | {str(i): i for i in range(1, 7)}
+
+
+def _grades_in(text: str) -> list[tuple[str | None, int | None]]:
+    out = []
+    for m in _GRADE_RE.finditer(text or ""):
+        word, prefix, year, year2, alone = m.groups()
+        stage = _GRADE_STAGE.get(word or prefix or alone or "")
+        out.append((stage, _GRADE_YEAR.get(year or year2 or "")))
+    return out
+
+
+def _short_value_supported(key: str, value: str, quote: str) -> bool:
+    """短值也得撑得住：年级按（阶段, 第几年）比；别的短值至少要有一个内容字出现在引文里。"""
+    if key == "grade" and _grades_in(value):
+        stage, year = _grades_in(value)[0]
+        return any((stage is None or s is None or s == stage) and (year is None or y is None or y == year)
+                   for s, y in _grades_in(quote))
+    v = _content_chars(value.lower())
+    return not v or bool(v & _content_chars(quote.lower()))
+
+
 # 这条记忆改变未来的哪个决策。填不出就没资格进画像。
 # 依据是「写入代价不对称」：少记一条只是下次再问一遍，记错一条会静默污染之后每个决策，
 # 而且没人会发现——所以默认不写，要写就举证。
@@ -440,6 +467,9 @@ AFFECT_KEYS = set(AFFECT_LABELS)
 # 只有这些 op 需要举证「改变了什么决策」；retract/support 是对已有事实的操作。
 _AFFECT_REQUIRED = ("add", "replace")
 
+# 模型 op 里这些字段只能是字符串或不填。
+_OP_FIELDS = ("op", "key", "value", "category", "source", "evidence_quote", "target_fact_id", "affects", "valid_until")
+
 
 def validate_ops(uid: str, ops: list[dict[str, Any]], evidence_pool: list[str]) -> tuple[list[dict], list[dict]]:
     """逐条校验。返回 (accepted, rejected)，rejected 带 reason 以便前端和日志展示。
@@ -453,6 +483,12 @@ def validate_ops(uid: str, ops: list[dict[str, Any]], evidence_pool: list[str]) 
     for raw in ops or []:
         if not isinstance(raw, dict):
             rejected.append({"op": None, "reason": "not_an_object"})
+            continue
+        # 字段只收字符串（或不填）：原来 key 是列表就 .strip() 抛异常、整轮 500，valid_until 是 [] / {} 过了校验到 SQLite 才炸（Codex 复现）
+        bad = next((f for f in _OP_FIELDS if not isinstance(raw.get(f), (str, type(None)))), None)
+        if bad:
+            rejected.append({"op": raw.get("op"), "key": raw.get("key"), "value": raw.get("value"), "raw": raw,
+                             "reason": f"bad_type:{bad}"})
             continue
         op = str(raw.get("op") or "").strip().lower()
         key = canon_key(raw.get("key") or "")
@@ -525,6 +561,10 @@ def validate_ops(uid: str, ops: list[dict[str, Any]], evidence_pool: list[str]) 
         ratio = support_ratio(value, quote) if (op in ("add", "replace") and substantive) else 1.0
         if op in ("add", "replace") and substantive and ratio < _SUPPORT_FLOOR:
             rejected.append({**item, "reason": f"value_exceeds_evidence:{ratio:.2f}"})
+            continue
+        if op in ("add", "replace") and not substantive and not _short_value_supported(key, value, quote):
+            # 短值原来跳过支撑度检查：学生说「我大二」，模型写年级「博士」也照样按 declared 存进去（Codex 复现）
+            rejected.append({**item, "reason": "short_value_not_in_evidence"})
             continue
 
         valid_until = raw.get("valid_until")

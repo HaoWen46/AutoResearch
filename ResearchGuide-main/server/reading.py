@@ -77,6 +77,7 @@ def daily(uid: str, kit_id: str, source: tuple[list[dict[str, Any]], str] | None
               "authors": p["authors"][:4], "url": p["url"]} for p in fresh if p["id"] not in seen][:6]
     keeps = [r for r in seen.values() if r["verdict"] == "keep"]
     return {"kit": {"id": k["id"], "name": k["name"]}, "items": items, "error": error,
+            "day": today,  # done_today 是哪一天的：前端同一天里只往大里改，换了一天就照新的来
             "goal": DAILY_GOAL, "done_today": len(done_today), "kept_total": len(keeps), "triaged_total": len(seen),
             "recent_keeps": sorted(keeps, key=lambda r: r["created_at"], reverse=True)[:5]}
 

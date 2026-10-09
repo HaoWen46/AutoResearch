@@ -118,6 +118,8 @@ def _post(url: str, key: str, payload: dict, timeout: int) -> tuple[dict | None,
         return None, f"network {type(exc).__name__}"
     except json.JSONDecodeError:
         return None, "bad json"
+    except UnicodeDecodeError:
+        return None, "bad utf-8"  # 回包不是合法 UTF-8：原来这个异常从这里漏出去，整轮 500（Codex 复现）
 
 
 def _deepseek_extras(cfg: dict, effort: str) -> dict:
@@ -167,11 +169,16 @@ def chat(system: str, user: str, *, temperature: float = 0.4, timeout: int = 25,
         time.sleep(0.8)
     text = None
     if data is not None:
-        try:
-            text = (data["choices"][0]["message"]["content"] or "").strip() or None
-        except (KeyError, IndexError, TypeError):
+        # 回包形状逐层核对：原来顶层是数组、content 是列表这类回包在这里抛异常，漏出降级边界（Codex 复现）
+        choices = data.get("choices") if isinstance(data, dict) else None
+        message = choices[0].get("message") if isinstance(choices, list) and choices and isinstance(choices[0], dict) else None
+        content = message.get("content") if isinstance(message, dict) else None
+        if not isinstance(message, dict) or not isinstance(content, (str, type(None))):
             err = "bad payload"
-    usage = (data or {}).get("usage") or {}
+        else:
+            text = (content or "").strip() or None
+    usage = data.get("usage") if isinstance(data, dict) else None
+    usage = usage if isinstance(usage, dict) else {}  # usage 是列表时原来读 token 数就抛异常（Codex 复现）
     print(json.dumps({
         "llm": tag, "model": cfg["model"], "ok": bool(text), "ms": int((time.time() - t0) * 1000),
         "tokens": usage.get("total_tokens"), "error": err or None,
@@ -200,11 +207,12 @@ def chat_json(system: str, user: str, *, timeout: int = 30, tag: str = "json") -
 
 
 def chat_stream(system: str, user: str, *, temperature: float = 0.6, timeout: int = 60,
-                tag: str = "stream", max_tokens: int = 2000):
+                tag: str = "stream", max_tokens: int = 2000, status: dict | None = None):
     """逐块产出助手文本（OpenAI 兼容的 SSE）。
 
     只在调用方能接受纯文本时使用——结构化决策（TurnProposal）必须走 chat_json，
     因为它需要完整 JSON 才能校验。失败时产出零块，调用方要自己兜底。
+    传了 status 时，流正常收尾（读到 [DONE] 或 finish_reason）会写 status["finished"] = True；没写就是中途断了。
     和 chat 一样的约束：DeepSeek 关思考、max_tokens 封顶、总时限 LLM_TOTAL_SECONDS、回复字节有上限——
     原来这里都没有：每个对话默认开着思考（贵、慢），一个一直吊着不结束的流能占住一个工作线程不放。
     """
@@ -243,14 +251,21 @@ def chat_stream(system: str, user: str, *, temperature: float = 0.6, timeout: in
                 continue
             body = line[5:].strip()
             if body == "[DONE]":
+                if status is not None:
+                    status["finished"] = True  # 原来断在半个 JSON / 半个汉字上，调用方也把半截当成功回复（Codex 复现）
                 break
             try:
                 chunk = json.loads(body)
             except json.JSONDecodeError:
                 continue
-            choices = chunk.get("choices") or [{}]
-            piece = (choices[0].get("delta") or {}).get("content")
-            if piece:
+            # 块的形状逐层核对，不对就跳过：原来 choices 不是列表、delta 不是对象会抛异常，content 是列表会原样交出去（Codex 复现）
+            choices = chunk.get("choices") if isinstance(chunk, dict) else None
+            choice = choices[0] if isinstance(choices, list) and choices and isinstance(choices[0], dict) else {}
+            if choice.get("finish_reason") and status is not None:
+                status["finished"] = True
+            delta = choice.get("delta")
+            piece = delta.get("content") if isinstance(delta, dict) else None
+            if piece and isinstance(piece, str):
                 pieces += 1
                 yield piece
     except urllib.error.HTTPError as exc:

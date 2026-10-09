@@ -193,8 +193,8 @@ def test_micro_task_without_direction_becomes_explore(monkeypatch):
 def test_task_direction_must_be_an_active_direction(monkeypatch):
     uid = make_user()
     fake_llm(monkeypatch, [proposal(reply="先定方向。", ops=[
-        {"op": "add", "key": "direction:math", "value": "数学", "evidence_quote": "我大二"}])])
-    did = dialogue.turn(uid, "我大二")["facts_added"][0]["id"]
+        {"op": "add", "key": "direction:math", "value": "数学", "evidence_quote": "想学数学"}])])
+    did = dialogue.turn(uid, "我大二，想学数学")["facts_added"][0]["id"]
 
     fake_llm(monkeypatch, [proposal(reply="做这个。", next_action={
         "action": "micro_task", "title": "读一篇论文", "direction": "ai", "based_on": [did]})])

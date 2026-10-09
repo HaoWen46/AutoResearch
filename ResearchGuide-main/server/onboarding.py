@@ -252,9 +252,11 @@ def _voice(user_msg: str, next_ask: str, fallback: str, closing: bool = False) -
     text = llm.chat(system, user, temperature=0.5, timeout=20)
     if not text:
         return fallback
-    if not closing and next_ask not in text:
-        text = text.rstrip("。") + "。" + next_ask
-    return text[:240]
+    if closing or (next_ask in text and len(text) <= 240):
+        return text[:240]
+    # 只截模型那段、给下一问留位置：原来接上问题再整段截 240 字，模型话一长问题被截掉，存下的消息里没有问题（Codex 复现）
+    head = text.split(next_ask, 1)[0]
+    return head[:240 - len(next_ask) - 1].rstrip("。") + "。" + next_ask
 
 
 def _extract_free_text(uid: str, round_def: dict[str, Any], msg: str, evidence: list, use_model: bool = True) -> UserFact:

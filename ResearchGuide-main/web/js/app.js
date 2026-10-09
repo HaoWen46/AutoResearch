@@ -4163,6 +4163,7 @@ async function dailyBlock(seq) {
     return box;
   }
   if (stale(seq)) return box;
+  if (d.day) box.dataset.day = d.day;
   const head = el("div", "daily-head");
   head.innerHTML = `<div><p class="section-label">每日情报 · 约 5 分钟 · 可跳过</p><h3 class="panel-title">分拣今天的新论文</h3><p class="panel-sub">「${esc(d.kit.name)}」相关的 arXiv 新论文。只看标题和摘要原文，决定留还是过，写一句为什么——这是在练判断，不是在读论文。</p></div><div class="score-ring"><span class="num">${d.done_today}</span>/ ${d.goal} 今天</div>`;
   box.appendChild(head);
@@ -4188,8 +4189,13 @@ async function dailyBlock(seq) {
         row.classList.add("done", verdict);
         ctl.innerHTML = `<span class="triage-done">${verdict === "keep" ? "已留下" : "已跳过"}：${esc(why.value)}</span>`;
         const n = box.querySelector(".daily-head .num");
-        // 几行同时交时回来的顺序不定：只往大里改，旧的那个数不能把新的盖小（Codex 复现）
-        if (n && r && typeof r.done_today === "number") n.textContent = String(Math.max(Number(n.textContent) || 0, r.done_today));
+        // 几行同时交时回来的顺序不定：同一天里只往大里改，旧的那个数不能把新的盖小；
+        // 过了零点就照新一天的数来（原来一律取大，跨天还显示昨天的 5/3，Codex 复现）
+        if (n && r && typeof r.done_today === "number") {
+          const sameDay = r.day && r.day === box.dataset.day;
+          n.textContent = String(sameDay ? Math.max(Number(n.textContent) || 0, r.done_today) : r.done_today);
+          if (r.day) box.dataset.day = r.day;
+        }
       } catch (e) { toast(e.message); keep.disabled = false; skip.disabled = false; why.focus(); }
       sending = false;
     };

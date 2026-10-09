@@ -618,6 +618,9 @@ def _clean_proposal(data: Any) -> dict[str, Any] | None:
     understanding = data.get("understanding")
     if not isinstance(understanding, dict):
         understanding = {}
+    # gist 在写完事实和助手消息之后才用：原来写成对象/数字/列表，存完了才抛异常、这一轮没有结果（Codex 复现）
+    gist = understanding.get("gist")
+    understanding = {**understanding, "gist": gist if isinstance(gist, str) else ""}
 
     offered = dialogue.get("offered_actions")
     if not isinstance(offered, list):
@@ -638,7 +641,8 @@ def _clean_proposal(data: Any) -> dict[str, Any] | None:
 def _evidence_pool(uid: str, conversation_id: str) -> list[str]:
     """校验引文用的证据池：本画像近期消息（含本轮刚写入的那条）。"""
     msgs = store.list_messages(uid, limit=40)
-    return [m["text"] for m in msgs if m.get("text")]
+    # 只认学生自己的话：原来助手消息也在池里，助手上一轮说的「你擅长 Python」能当学生自述写进画像（Codex 复现）
+    return [m["text"] for m in msgs if m.get("text") and m.get("role") == "user"]
 
 
 # ---------- 降级：规则版一轮 ----------
@@ -912,11 +916,14 @@ def turn_steps(uid: str, message: str, conversation_id: str | None = None,
         yield ("stage", {"name": "compose"})
         if stream_reply and llm.enabled():
             acc: list[str] = []
-            for piece in _stream_reply(env, proposal):
+            status: dict[str, Any] = {}
+            for piece in _stream_reply(env, proposal, status):
                 acc.append(piece)
                 yield ("delta", {"text": piece})
             streamed = "".join(acc).strip()
-            if streamed:
+            # 流正常收尾才用流出来的正文；断在半截就沿用调用①写好的完整回复（结果事件里给的是它，前端会整段换掉）。
+            # 原来半截也当成功回复存下，盖掉了完整的那段（Codex 复现）。调用①本来就是模型的回复，不算降级
+            if status.get("finished") and streamed:
                 reply = streamed[:4000]
             # 流式失败就沿用调用①已经写好的 reply，不额外再发一次请求
 
@@ -977,15 +984,15 @@ def turn(uid: str, message: str, conversation_id: str | None = None) -> dict[str
     return result
 
 
-def _stream_reply(env: dict[str, Any], proposal: dict[str, Any]):
-    """调用②（流式）：只产出给用户看的正文。"""
+def _stream_reply(env: dict[str, Any], proposal: dict[str, Any], status: dict[str, Any] | None = None):
+    """调用②（流式）：只产出给用户看的正文。流正常收尾时 status["finished"] 为 True。"""
     import json
     user = (
         f"【本轮环境】\n{_env_for_prompt(env)}\n\n"
         f"【你的判断】{json.dumps(proposal.get('dialogue', {}), ensure_ascii=False)}\n\n"
         "把要对用户说的那段话写出来。"
     )
-    yield from llm.chat_stream(_reply_plain_system(), user, tag="dialogue.reply.stream")
+    yield from llm.chat_stream(_reply_plain_system(), user, tag="dialogue.reply.stream", status=status)
 
 
 def _tool_fallback_reply(result: dict[str, Any]) -> str:

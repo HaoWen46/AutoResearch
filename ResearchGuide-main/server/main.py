@@ -98,6 +98,7 @@ async def _lifespan(_app: FastAPI):
                          ensure_ascii=False))
     yield
     await anyio.to_thread.run_sync(_MODEL.drain)  # 还在跑的模型活（浏览器走了照样在写的那一轮）做完再退
+    await anyio.to_thread.run_sync(_REVIEW.drain)  # 在评的项目也是：评完记进项目再退（原来只等了 _MODEL，评阅写一半就没了，Codex 复现）
 
 
 app = FastAPI(title="启研 · AI Research Mentor (W0 Demo)", version="0.1.0", dependencies=[Depends(auth.guard)],
@@ -1002,6 +1003,7 @@ UPLOAD_TOTAL_SECONDS = 300  # 总时限：20 MB 在 70 KB/s 的慢网上也传�
 # 在评阅和排队的都在这个池子里数（workpool：取消的排队活当场拿掉，连同它握着的压缩包）。原来另记一个计数，
 # 请求一取消计数就减，排队的活却还留在 ThreadPoolExecutor 里握着 20 MB：反复交了又断开，队里堆了 32 份（Codex 复现）
 _REVIEW = workpool.BoundedPool(REVIEW_WORKERS, REVIEW_PENDING_MAX - REVIEW_WORKERS, "review")
+atexit.register(_REVIEW.drain)
 _uploads = 0  # 只在事件循环线程里改，不用锁
 
 

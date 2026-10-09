@@ -399,11 +399,9 @@ def submit(uid: str, task: MicroTask, payload: str) -> Feedback:
     这就是「在任务区做完 → 回到对话，对话知道你完成了」的那一步。
     少了它，用户做完了任务、回到对话，对话还停在这一步问他要不要做。
     """
-    submission_id = store.save_submission(task.id, uid, payload)
-    task.status = "done"
-    store.save_task(task)
-
+    # 先有反馈再存提交、标完成：原来先标完成再评分，评分一出错任务就成了「已完成、没反馈」（Codex 复现）
     fb = _llm_feedback(task, payload) or _mock_feedback(task, payload)
+    submission_id = store.save_submission(task.id, uid, payload)
 
     # ---- 真实写回：一条 behavior 事实（NEXT_PRE 硬要求）----
     fact_value = (
@@ -423,6 +421,8 @@ def submit(uid: str, task: MicroTask, payload: str) -> Feedback:
     store.add_fact(fact)
     fb["learned_facts"] = [fact.to_dict()]
     store.save_feedback(submission_id, fb)
+    task.status = "done"
+    store.save_task(task)
 
     if task.action_id:
         a = store.get_action(uid, task.action_id)
@@ -461,18 +461,19 @@ def _llm_feedback(task: MicroTask, payload: str) -> dict[str, Any] | None:
         return None
     judged = []
     for i, item in enumerate(data["rubric"]):
-        if not isinstance(item, dict):
+        # 只认 JSON 的 true/false：原来 bool("false") 为真，三条写着未做到却存成全过、100 分（Codex 复现）
+        if not isinstance(item, dict) or not isinstance(item.get("pass"), bool):
             return None
         judged.append({
             "criterion": criteria[i],
-            "pass": bool(item.get("pass")),
+            "pass": item["pass"],
             "comment": str(item.get("comment") or "已阅读。")[:80],
         })
-    try:
-        score = int(data.get("score"))
-    except (TypeError, ValueError):
-        score = round(sum(1 for j in judged if j["pass"]) / len(judged) * 100)
-    score = max(0, min(100, score))
+    raw = data.get("score")
+    # 分数先查是有限数且在 0–100 再取整：原来 1e309 读成 inf，int(inf) 抛 OverflowError，提交接口 500（Codex 复现）
+    if isinstance(raw, bool) or not isinstance(raw, (int, float)) or not math.isfinite(raw) or not 0 <= raw <= 100:
+        return None
+    score = int(raw)
     return {
         "score": score,
         "rubric": judged,

@@ -490,26 +490,31 @@ def _llm_review(bundle: dict[str, Any], checks: dict[str, Any], project: dict[st
     items = (data or {}).get("criteria") if isinstance(data, dict) else None
     if not isinstance(items, list):
         return None
-    by_key = {i.get("key"): i for i in items if isinstance(i, dict)}
+    # 模型给的结构先逐项核对类型：key 是列表、evidence 是数字这类，原来直接 500，额度扣了、评阅也没存（Codex 复现）
+    by_key = {i["key"]: i for i in items if isinstance(i, dict) and isinstance(i.get("key"), str)}
+    paths = {i["path"] for i in bundle["inventory"]}
     out = []
     for c in CRITERIA:
         it = by_key.get(c["key"])
         if not it:
             return None
-        st = str(it.get("status") or "fail")
+        st = it.get("status") if isinstance(it.get("status"), str) else "fail"
         if st not in ORDER:
             st = "fail"
         cap = checks["caps"][c["key"]]
         if ORDER[st] > ORDER[cap]:
             st = cap
         ev = []
-        for e in it.get("evidence") or []:
-            if not isinstance(e, dict):
+        raw_ev = it.get("evidence")
+        for e in raw_ev if isinstance(raw_ev, list) else []:
+            if not isinstance(e, dict) or not isinstance(e.get("file"), str):
                 continue
-            f, q = str(e.get("file") or ""), str(e.get("quote") or "").strip()
-            src = bundle["texts"].get(f, "")
-            if f and (not q or q in src):  # 引文必须真的在那个文件里
+            f, q = e["file"], (e.get("quote") if isinstance(e.get("quote"), str) else "").strip()
+            # 文件必须真在压缩包里；写了引文就必须真在那个文件里。原来不存在的文件配空引文也算证据（Codex 复现）
+            if f in paths and (not q or q in bundle["texts"].get(f, "")):
                 ev.append({"file": f, "quote": q[:60]})
+        if st == "pass" and not ev:
+            st = "partial"  # 说做到了却拿不出一条站得住的证据（编的引文被滤掉了）：不算做到
         fix = str(it.get("fix") or "").strip()[:160]
         if st != "pass" and not fix:
             fix = RULE_FIX[c["key"]]

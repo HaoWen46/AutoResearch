@@ -4,10 +4,12 @@
 模型钱是团队的（DeepSeek 密钥在服务器上）。原来任何人开个访客号就能无限次触发模型调用：
 六十次交任务、几次对话就是七十次真实调用，没人同意过隐私说明也照样调。现在：
 - 谁在调：auth.guard 在每个请求开头 bind(uid)；公开接口 bind 成匿名，匿名一律不许调。
-- 上限（每天，北京时间）：全站 LLM_DAILY_TOTAL、绑了微信的人 LLM_DAILY_USER、访客 LLM_DAILY_GUEST。
+- 上限（每天，北京时间）：全站 LLM_DAILY_TOTAL、绑了微信的人 LLM_DAILY_USER、访客 LLM_DAILY_GUEST，
+  另外全体访客加起来 LLM_DAILY_GUESTS：访客号谁都能开（同一个出口地址一小时几百个，见 auth.PER_IP_HOUR），
+  刷一堆访客号最多花掉这一份，花不到绑了微信的人头上。
 - 没同意当前版本隐私说明的人不调：对话和成绩单会发给模型服务，这一条必须先同意。
 - 不在 HTTP 请求里（脚本、测试直接调函数）不计不限：上下文变量是 None。
-llm.enabled() 先问这里有没有额度（各功能本来就会在模型不可用时回退规则），llm.chat 真正调用前再扣一笔。
+llm.enabled() 先问这里有没有额度（各功能本来就会在模型不可用时回退规则），llm.chat 每次真正请求上游前扣一笔（重试也扣）。
 """
 from __future__ import annotations
 
@@ -43,6 +45,13 @@ def guest_cap() -> int:
     return _int("LLM_DAILY_GUEST", 15)
 
 
+def guests_cap() -> int:
+    return _int("LLM_DAILY_GUESTS", 500)
+
+
+GUESTS = "*guest"  # llm_usage 里全体访客合计的那一行
+
+
 def bind(uid: str | None) -> None:
     """这个请求是谁的。None 只用于请求之外；请求里没有登录就传 ANON。"""
     _WHO.set(uid if uid is not None else ANON)
@@ -62,18 +71,25 @@ def _today() -> str:
     return datetime.now(CN).strftime("%Y-%m-%d")
 
 
-def cap_for(uid: str) -> int:
-    """这个人今天最多调几次。没同意隐私说明、账号不存在都是 0。"""
+def _caps(uid: str) -> dict[str, int]:
+    """这一笔要过的每道上限：这个人、全站，访客再加全体访客。没同意隐私说明、账号不存在，这个人的上限是 0。"""
     import auth  # auth 也 import 本模块，放到函数里避免循环
     u = store.get_user(uid)
     if not u or u.get("consent_version") != auth.PRIVACY_VERSION:
-        return 0
-    return user_cap() if u.get("wechat_openid") else guest_cap()
+        return {uid: 0, "*": total_cap()}
+    if u.get("wechat_openid"):
+        return {uid: user_cap(), "*": total_cap()}
+    return {uid: guest_cap(), "*": total_cap(), GUESTS: guests_cap()}
+
+
+def cap_for(uid: str) -> int:
+    """这个人自己今天最多调几次。"""
+    return _caps(uid)[uid]
 
 
 def left(uid: str) -> int:
     day = _today()
-    return max(0, min(cap_for(uid) - store.llm_calls(day, uid), total_cap() - store.llm_calls(day, "*")))
+    return max(0, min(cap - store.llm_calls(day, k) for k, cap in _caps(uid).items()))
 
 
 def allowed() -> bool:
@@ -91,4 +107,4 @@ def charge() -> bool:
         return True
     if not who:
         return False
-    return store.llm_charge(_today(), who, cap_for(who), total_cap())
+    return store.llm_charge(_today(), _caps(who))

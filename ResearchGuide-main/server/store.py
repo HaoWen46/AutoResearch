@@ -506,14 +506,17 @@ def llm_calls(day: str, uid: str) -> int:
     return row["calls"] if row else 0
 
 
-def llm_charge(day: str, uid: str, user_cap: int, total_cap: int) -> bool:
-    """查额度和扣一笔在同一个事务里：并发的两个请求不会都看到「还剩一次」然后都调。"""
+def llm_charge(day: str, caps: dict[str, int]) -> bool:
+    """caps：计数的 key（某个人的 uid、全站 '*'、全体访客 '*guest'）→ 今天的上限。每个都没到上限才扣，一起各加一。
+    查额度和扣一笔在同一个事务里：并发的两个请求不会都看到「还剩一次」然后都调。"""
+    keys = list(caps)
     with _LOCK, _conn() as c:
         rows = {r["user_id"]: r["calls"] for r in
-                c.execute("SELECT user_id, calls FROM llm_usage WHERE day=? AND user_id IN (?, '*')", (day, uid))}
-        if rows.get(uid, 0) >= user_cap or rows.get("*", 0) >= total_cap:
+                c.execute(f"SELECT user_id, calls FROM llm_usage WHERE day=? AND user_id IN ({','.join('?' * len(keys))})",
+                          (day, *keys))}
+        if any(rows.get(k, 0) >= cap for k, cap in caps.items()):
             return False
-        for who in (uid, "*"):
+        for who in keys:
             c.execute("INSERT INTO llm_usage(day, user_id, calls) VALUES(?,?,1)"
                       " ON CONFLICT(day, user_id) DO UPDATE SET calls=calls+1", (day, who))
     return True

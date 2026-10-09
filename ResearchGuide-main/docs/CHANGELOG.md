@@ -6,11 +6,11 @@
 
 ---
 
-## [2026-10-10] [FIX] Codex 四轮复查：权限、预算、注入、并发写、可用性、数据正确性
+## [2026-10-10] [FIX] Codex 五轮复查和两百人压测：权限、预算、注入、并发写、可用性、数据正确性
 
-- 变更内容：Codex（gpt-6-astra）对 #16/#17 和全站做了四轮审查，逐条复现后修掉。权限：uid 核对不再看 Content-Type 大小写；微信只认安全模式、同一条消息不能配两次登录、猜数字先查限额。预算：模型调用按人/按全站每天封顶，访客、没同意隐私说明的、匿名接口不调（budget.py）。注入：前端所有 innerHTML 先消毒，几处模型/用户文本逐处转义。并发：同一个人的改动一件一件来（userlock.py，异步等锁、每人排队上限），流式对话在自己的线程里跑完再放锁；删号后在路上的请求写不回来（墓碑 + 触发器）；评阅记录按当时的画像。可用性：MCP 不卡事件循环，论文抓取有上限、没人等的就取消，/api/papers 要登录。数据：成绩单按学期替换、「不及格」保留、半学分照算、无穷大学分拒收并修老库；改方向换键而不是换标签；替换写入新来源和可信度；重复结论和重复卡都对账；任务反馈存库；导出在一个读事务里。前端：换人整页重载、草稿按人存、只在明确退出时清；对话页晚到的渲染不覆盖别的页。
+- 变更内容：Codex（gpt-6-astra）对 #16/#17 和全站做了四轮审查，逐条复现后修掉。权限：uid 核对不再看 Content-Type 大小写；微信只认安全模式、同一条消息不能配两次登录、猜数字先查限额。预算：模型调用按人/按全站每天封顶，访客、没同意隐私说明的、匿名接口不调（budget.py）。注入：前端所有 innerHTML 先消毒，几处模型/用户文本逐处转义。并发：同一个人的改动一件一件来（userlock.py，异步等锁、每人排队上限），流式对话在自己的线程里跑完再放锁；删号后在路上的请求写不回来（墓碑 + 触发器）；评阅记录按当时的画像。可用性：MCP 不卡事件循环，论文抓取有上限、没人等的就取消，/api/papers 要登录。数据：成绩单按学期替换、「不及格」保留、半学分照算、无穷大学分拒收并修老库；改方向换键而不是换标签；替换写入新来源和可信度；重复结论和重复卡都对账；任务反馈存库；导出在一个读事务里。前端：换人整页重载、草稿按人存、只在明确退出时清；对话页晚到的渲染不覆盖别的页。压测（模拟两百人同时用）：等模型的接口挪进自己的线程池（workpool.py），公用池留给普通读写，原来两百人等模型时连健康检查都要排五秒；浏览器走了，还在排队的那轮对话撤掉、马上放锁，排队有上限（满了回 503）；同一出口地址一小时 600 次登录（原来 30，一个机房开不了号），全体访客另有每天合计的模型额度；上游重试也扣额度。
 - 影响文档：docs/DEPLOY.md、docs/CHANGELOG.md、.env.example
-- 影响模块：server/auth.py、server/budget.py（新）、server/userlock.py（新）、server/envfile.py（新）、server/wechat.py、server/store.py、server/main.py、server/llm.py、server/memory.py、server/reading.py、server/workbench.py、server/transcript.py、server/dialogue.py、server/singleflight.py、web/js/app.js、web/js/chat.js、tools/backup_db.py、tools/verify/verify_receipt_render.js、server/tests/
+- 影响模块：server/auth.py、server/budget.py（新）、server/userlock.py（新）、server/workpool.py（新）、server/envfile.py（新）、server/wechat.py、server/store.py、server/main.py、server/llm.py、server/memory.py、server/reading.py、server/workbench.py、server/transcript.py、server/dialogue.py、server/singleflight.py、web/js/app.js、web/js/chat.js、tools/backup_db.py、tools/verify/verify_receipt_render.js、server/tests/
 - 决策来源：陈浩文（上线前让 Codex 按「真的会有人用」来挑错）
 - 登记人：陈浩文
 

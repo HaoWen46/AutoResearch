@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import contextvars
+import functools
 import hmac
 import json
 import math
@@ -45,6 +46,7 @@ import submission
 import transcript
 import userlock
 import workbench
+import workpool
 from pku_adapter import search_courses
 from limits import TTLCache
 from singleflight import AsyncFlight, Overloaded
@@ -54,6 +56,26 @@ WEB_DIR = Path(__file__).resolve().parent.parent / "web"
 # Starlette 的工作线程池默认 40 个：每个同步接口、每个流式对话各占一个线程直到做完。
 # 四十个学生同时在对话，第四十一个人的任何请求都要排队。线程等模型回话几乎不占资源，可以多开。
 THREADS = int(os.environ.get("QIYAN_THREADS") or 128)
+
+# 要等模型的活（对话、交任务、方向推荐……）不进上面那个公用池，在 workpool 里跑：公用池留给普通读写，
+# 两百个人同时等模型也不会让登录、读任务排队（Codex 第五轮压测）。排队的再超过 MODEL_QUEUE 个就回 503。
+MODEL_THREADS = int(os.environ.get("QIYAN_MODEL_THREADS") or os.environ.get("QIYAN_TURN_THREADS") or 96)
+MODEL_QUEUE = int(os.environ.get("QIYAN_MODEL_QUEUE") or 160)
+_MODEL = workpool.BoundedPool(MODEL_THREADS, MODEL_QUEUE, "model")
+CROWDED_MSG = "现在用的人太多，模型那边在排队。请过一会儿再试"
+
+
+def _model_work(fn):
+    """把一个同步接口挪进 _MODEL 里跑。FastAPI 照样按原函数的签名解析参数；拿锁的依赖（SERIAL）在外面，
+    排队期间照样拿着这个人的锁。等待的协程被取消时，还没开始的活随之取消（asyncio.wrap_future 会转过去）。"""
+    @functools.wraps(fn)
+    async def endpoint(*args, **kwargs):
+        try:
+            fut = _MODEL.submit(functools.partial(fn, *args, **kwargs))
+        except Overloaded as exc:
+            raise HTTPException(503, CROWDED_MSG) from exc
+        return await asyncio.wrap_future(fut)
+    return endpoint
 
 
 @asynccontextmanager
@@ -262,12 +284,14 @@ def _user_or_404(uid: str) -> dict:
 # ---------- onboarding ----------
 
 @app.post("/api/onboard/start", dependencies=SERIAL)
+@_model_work
 def onboard_start(req: NBAReq):
     _user_or_404(req.uid)
     return onboarding.start(req.uid)
 
 
 @app.post("/api/onboard/message", dependencies=SERIAL)
+@_model_work
 def onboard_message(req: OnboardMsgReq):
     _user_or_404(req.uid)
     state = store.get_onboard_state(req.uid)
@@ -333,6 +357,7 @@ def onboard_confirm(req: OnboardConfirmReq):
 # ---------- 对话内核（任务2：环境观察 → 决策 → 工具 → 记忆）----------
 
 @app.post("/api/dialogue/turn", dependencies=SERIAL)
+@_model_work
 def dialogue_turn(req: DialogueTurnReq):
     _user_or_404(req.uid)
     if not req.message.strip():
@@ -347,10 +372,22 @@ def _sse(event: str, data: dict) -> str:
     return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
 
 
-# 流式对话的每一轮在这个池子里从头跑到尾：它拿着这个人的锁，不管浏览器断没断都做完、放锁。
-# 原来在响应的同步生成器里跑：浏览器断开时 Starlette 不关生成器，锁要等垃圾回收才放（Codex 复现：之后的改动全 409），
-# 而且每一轮占着一个公用的工作线程。
-_TURN_POOL = ThreadPoolExecutor(max_workers=int(os.environ.get("QIYAN_TURN_THREADS") or 32), thread_name_prefix="turn")
+HEARTBEAT = 10.0  # 秒
+
+
+class _TurnStream(StreamingResponse):
+    """响应不管怎么结束（发完、浏览器断开、出错、服务在关）都调一次 on_close。
+    StreamingResponse 自己的 background 在 ASGI 2.4 下断开时不会跑，生成器没开始就断开时它的 finally 也不会跑。"""
+
+    def __init__(self, content, on_close, **kw):
+        super().__init__(content, **kw)
+        self._on_close = on_close
+
+    async def __call__(self, scope, receive, send):
+        try:
+            await super().__call__(scope, receive, send)
+        finally:
+            self._on_close()
 
 
 @app.post("/api/dialogue/stream")
@@ -363,6 +400,8 @@ async def dialogue_stream(req: DialogueTurnReq):
     await run_in_threadpool(_user_or_404, req.uid)
     if not req.message.strip():
         raise HTTPException(400, "message is required")
+    if _MODEL.stats()["queued"] >= MODEL_QUEUE:  # 先看一眼：队已经满了就别再等这个人的锁十五秒
+        raise HTTPException(503, CROWDED_MSG)
     try:
         ticket = await userlock.acquire(req.uid)  # 整轮拿着这个人的锁：等模型时切画像、再发一句，都等它做完
     except userlock.Busy as exc:
@@ -388,21 +427,38 @@ async def dialogue_stream(req: DialogueTurnReq):
             ticket.release()
             put(None)
 
+    # 这一轮在 _MODEL 里从头跑到尾、拿着这个人的锁；开始了就不管浏览器断没断都做完、自己放锁（回复照样记进历史）。
+    # 原来用 run_in_executor 丢进去就不管了：两百个浏览器断开后，168 轮还在排队、锁一直拿着，
+    # 这些人再改东西 15 秒后全 409，最后没人看的 400 次模型调用照样跑完（Codex 第五轮压测）。
     try:
-        loop.run_in_executor(_TURN_POOL, contextvars.copy_context().run, work)  # 带上请求上下文（模型额度算在谁头上）
+        fut = _MODEL.submit(work)
+    except Overloaded as exc:
+        ticket.release()
+        raise HTTPException(503, CROWDED_MSG) from exc
     except BaseException:
         ticket.release()
         raise
 
+    def abandon() -> None:
+        """响应结束了。这一轮要是还在排队（浏览器没等到就走了），撤掉、放锁；已经在跑或跑完的不动。"""
+        if fut.cancel():
+            ticket.release()
+
     async def relay():
         while True:
-            item = await events.get()
+            try:
+                item = await asyncio.wait_for(events.get(), HEARTBEAT)
+            except asyncio.TimeoutError:
+                # 排队或等模型时隔一会儿发一行 SSE 注释（前端不认、直接跳过）：代理不会把空闲的连接掐掉，
+                # 浏览器已经走了的话这一写就会失败，响应结束、还在排队的这一轮被撤掉（上面的 abandon）
+                yield ": wait\n\n"
+                continue
             if item is None:
                 return
             yield item
 
-    return StreamingResponse(relay(), media_type="text/event-stream",
-                             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+    return _TurnStream(relay(), abandon, media_type="text/event-stream",
+                       headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
 
 @app.post("/api/dialogue/action", dependencies=SERIAL)
@@ -550,6 +606,7 @@ def transcript_board(uid: str) -> dict:
 
 
 @app.post("/api/portraits", dependencies=SERIAL)
+@_model_work
 def portraits_create(req: PortraitReq):
     _user_or_404(req.uid)
     store.open_new_portrait(req.uid)
@@ -570,6 +627,7 @@ def portraits_activate(req: PortraitReq):
 
 
 @app.delete("/api/portraits/{pid}", dependencies=SERIAL)
+@_model_work
 def portraits_delete(pid: str, uid: str):
     _user_or_404(uid)
     try:
@@ -584,6 +642,7 @@ def portraits_delete(pid: str, uid: str):
 # ---------- nba / directions ----------
 
 @app.post("/api/nba")
+@_model_work
 def nba(req: NBAReq):
     _user_or_404(req.uid)
     return planner.next_best_action(req.uid)
@@ -597,6 +656,7 @@ def directions_recommend(uid: str):
 
 
 @app.post("/api/directions/cards")
+@_model_work
 def direction_cards(req: NBAReq):
     """带真实课程检索的推荐卡（课程 live，可能较慢，前端按卡懒加载时不用此聚合接口）。"""
     _user_or_404(req.uid)
@@ -639,6 +699,7 @@ def task_list(uid: str):
 
 
 @app.post("/api/tasks/{tid}/submit", dependencies=SERIAL)
+@_model_work
 def task_submit(tid: str, req: SubmitReq):
     _user_or_404(req.uid)
     t = store.get_task(tid)
@@ -837,6 +898,7 @@ def project_context(uid: str):
 
 
 @app.post("/api/projects/search")
+@_model_work
 def project_search(req: ProjectSearchReq):
     _user_or_404(req.uid)
     if req.direction not in planner.DIRECTIONS:
@@ -1243,6 +1305,7 @@ def health():
         "auth": auth.status(),
         "db": {"ephemeral": store.ephemeral()},  # true 就是库会随实例一起没：上线前必须是 false
         "threads": THREADS,
+        "model_pool": _MODEL.stats(),  # queued 长时间接近 max_queued：要么模型慢了，要么该加 QIYAN_MODEL_THREADS
     }
 
 

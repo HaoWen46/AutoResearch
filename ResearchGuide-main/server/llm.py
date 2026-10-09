@@ -129,7 +129,8 @@ def _deepseek_extras(cfg: dict, effort: str) -> dict:
 
 def chat(system: str, user: str, *, temperature: float = 0.4, timeout: int = 25,
          json_mode: bool = False, tag: str = "chat", max_tokens: int = 2000) -> str | None:
-    """返回助手文本；失败、未配置或没有额度返回 None。网络错误、429、5xx 重试一次（只扣一笔）。"""
+    """返回助手文本；失败、未配置或没有额度返回 None。网络错误、429、5xx 重试一次。
+    每次请求上游都扣一笔：失败的那次上游也可能已经算了钱（比如回到一半断了），额度要和真实请求次数对得上。"""
     cfg = config()
     if not cfg["enabled"]:
         return None
@@ -156,6 +157,9 @@ def chat(system: str, user: str, *, temperature: float = 0.4, timeout: int = 25,
     t0 = time.time()
     data, err = None, ""
     for attempt in range(2):
+        if attempt and not budget.charge():
+            err += "; no budget to retry"
+            break
         data, err = _post(url, key, payload, timeout)
         retry = err.startswith("network") or err in ("http 429", "http 500", "http 502", "http 503", "http 504")
         if data is not None or not retry or attempt == 1:

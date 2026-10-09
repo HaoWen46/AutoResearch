@@ -45,6 +45,15 @@ def llm_key() -> str:
             or root_env.get("LLM_API_KEY") or "")
 
 
+def existing_env(cli: Client, name: str) -> dict[str, str]:
+    """函数上现有的环境变量（控制台里配的公众号密钥、挂了 NAS 之后的库路径……）。取不到（函数还没建）就是空的。"""
+    try:
+        got = cli.get_function(name, fc.GetFunctionRequest())
+        return dict((got.body.environment_variables or {}) if got.body else {})
+    except Exception:
+        return {}
+
+
 def client(ak: str, sk: str, aid: str) -> Client:
     return Client(Config(
         access_key_id=ak,
@@ -67,13 +76,20 @@ def main() -> None:
     cli = client(ak, sk, aid)
     runtime = RuntimeOptions(read_timeout=120000, connect_timeout=30000)
     code = fc.InputCodeLocation(zip_file=base64.b64encode(zip_bytes).decode())
-    db_name = "/tmp/qiyan-test.db" if name != DEFAULT_NAME else "/tmp/qiyan.db"
+    # 更新是整份换掉环境变量：在函数现有的那份上改，不然每发一次版，控制台里配的 WECHAT_*（微信登录）就没了、
+    # 挂了 NAS 之后改成的 QIYAN_DB 又被写回 /tmp（学生的账号和记录全看不到，Codex 复现）。
+    # 库路径：本机 .env 写了 QIYAN_DB 就用它；否则保留函数上现有的；都没有才用 /tmp（实例回收就丢，见 docs/DEPLOY.md）
+    current = existing_env(cli, name)
+    db_name = (env.get("QIYAN_DB") or current.get("QIYAN_DB")
+               or ("/tmp/qiyan-test.db" if name != DEFAULT_NAME else "/tmp/qiyan.db"))
     env_vars = {
+        **current,
         "QIYAN_DB": db_name,
-        "LLM_BASE_URL": "https://api.deepseek.com/v1",
-        "LLM_MODEL": "deepseek-flash",
+        "LLM_BASE_URL": current.get("LLM_BASE_URL") or "https://api.deepseek.com/v1",
+        "LLM_MODEL": current.get("LLM_MODEL") or "deepseek-flash",
         "QIYAN_ENV": "test" if name != DEFAULT_NAME else "prod",
     }
+    print("QIYAN_DB", db_name)
     key = llm_key()
     if key:
         env_vars["LLM_API_KEY"] = key

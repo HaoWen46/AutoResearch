@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import io
 import json
+import posixpath
 import re
 import struct
 import zipfile
@@ -343,19 +344,22 @@ def _referenced_paths(text: str, inventory: list[dict[str, Any]], readme_path: s
     for p in paths:
         names.setdefault(p.rsplit("/", 1)[-1], []).append(p)
     found, missing = [], []
+    base = readme_path.rsplit("/", 1)[0] if "/" in readme_path else ""
     for tok in _path_tokens(text):
-        tok = re.sub(r"/+", "/", tok).lstrip("./")
-        # README 在子目录里（work/README.md）时，它写的 results/x.csv 指的是 work/results/x.csv
-        base = readme_path.rsplit("/", 1)[0] + "/" if "/" in readme_path else ""
-        if base and base + tok in paths:
-            found.append(base + tok)
-        elif tok in paths:
-            found.append(tok)
-        elif "/" not in tok and len(names.get(tok, [])) == 1:
+        tok = re.sub(r"/+", "/", tok)
+        # 按 README 所在目录解析，再规整掉 ./ 和 ../：work/docs/README.md 写的 ../results/x.csv 指 work/results/x.csv。
+        # 原来先把开头的 ./ 和 ../ 剥掉再拼，../ 的意思就变了，明明在的结果被判成没找到（Codex 复现）
+        rel = posixpath.normpath(posixpath.join(base, tok)) if base else posixpath.normpath(tok)
+        root = posixpath.normpath(tok.lstrip("/"))  # 也认从压缩包根目录写起的
+        if rel in paths:
+            found.append(rel)
+        elif root in paths:
+            found.append(root)
+        elif "/" not in root and len(names.get(root, [])) == 1:
             # 带目录的引用必须路径完全对上（写 results/ 实际在 data/ 算没找到）；只写文件名时，同名文件唯一才认
-            found.append(names[tok][0])
-        elif not tok.lower().startswith("readme"):
-            missing.append(tok)
+            found.append(names[root][0])
+        elif not root.lower().startswith("readme"):
+            missing.append(root)
     return sorted(set(found)), sorted(set(missing))
 
 

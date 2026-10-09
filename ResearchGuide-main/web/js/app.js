@@ -3696,7 +3696,9 @@ async function renderToday() {
   card.appendChild(act);
   wrap.appendChild(card);
   $app.appendChild(wrap);
-  if ((talked && drafts === 0) || field) {
+  // 服务端的下一步建议不知道项目的状态：本地已经给了「交成果 / 再改一处」时别拿它盖掉（原来按钮被换成普通作业，Codex 复现）
+  const projectFirst = !!field && !!(toFix || toSubmit);
+  if (!projectFirst && ((talked && drafts === 0) || field)) {
     api("POST", "/api/nba", { uid: S.uid }).then((nba) => {
       if (stale(seq) || !nba || !nba.title || !nba.rationale) return;
       card.querySelector(".nba-title").textContent = nba.title;

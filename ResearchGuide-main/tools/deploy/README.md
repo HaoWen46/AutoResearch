@@ -13,12 +13,14 @@ https://chengcanwu.github.io/AutoResearch/
 
 ## 发布
 
-在 `ResearchGuide-main/tools/deploy`：
+在 `ResearchGuide-main/tools/deploy`（发布脚本要阿里云 SDK，用 uv 临时带上，不装进项目）：
 
 ```
-python download_wheels.py
-python deploy_fc.py
+uv run --no-project --with pip python download_wheels.py
+uv run --no-project --with alibabacloud_fc20230330 --with alibabacloud_tea_openapi --with alibabacloud_tea_util python deploy_fc.py
 ```
+
+更新函数时保留函数上已有的环境变量（控制台里配的 `WECHAT_*`、改过的 `QIYAN_DB`）；本机 `.env` 写了 `QIYAN_DB` 就用它。
 
 函数名 `qiyan`，地域 `cn-hangzhou`。公网地址写在已忽略的 `.deploy.env` 的 `PUBLIC_URL`。
 

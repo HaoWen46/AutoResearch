@@ -63,3 +63,12 @@ def test_references_resolve_relative_to_a_nested_readme():
                                     "work/results/table.csv": "a,b\n1,2\n"}), PROJECT)
     assert "work/results/table.csv" in r["checks"]["referenced"]
     assert "results/table.csv" not in r["checks"]["missing_refs"]
+
+
+def test_parent_directory_links_resolve_from_the_readme():
+    """work/docs/README.md 写的 ../results/table.csv 指 work/results/table.csv。原来先剥掉 ../ 再拼，判成没找到（Codex 复现）。"""
+    readme = BASE + "\n## 结果在哪\n../results/table.csv 是结果表，./notes.md 是笔记。\n"
+    r = submission.review(make_zip({"LICENSE": "MIT", "work/docs/README.md": readme, "work/docs/notes.md": "n",
+                                    "work/src/main.py": "print(1)", "work/results/table.csv": "a,b\n1,2\n"}), PROJECT)
+    assert "work/results/table.csv" in r["checks"]["referenced"] and "work/docs/notes.md" in r["checks"]["referenced"]
+    assert not any("table.csv" in m for m in r["checks"]["missing_refs"])

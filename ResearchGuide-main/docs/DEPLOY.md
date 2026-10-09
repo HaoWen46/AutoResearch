@@ -28,12 +28,12 @@ docker compose up qiyan
 
 ```
 cd ResearchGuide-main/tools/deploy
-python download_wheels.py
-python deploy_fc.py
-python deploy_fc.py qiyan-test
+uv run --no-project --with pip python download_wheels.py
+uv run --no-project --with alibabacloud_fc20230330 --with alibabacloud_tea_openapi --with alibabacloud_tea_util python deploy_fc.py
+uv run --no-project --with alibabacloud_fc20230330 --with alibabacloud_tea_openapi --with alibabacloud_tea_util python deploy_fc.py qiyan-test
 ```
 
-生产函数名 `qiyan`，测试函数名 `qiyan-test`。密钥只在本机 `.env` 和函数环境变量，不入库。
+生产函数名 `qiyan`，测试函数名 `qiyan-test`。密钥只在本机 `.env` 和函数环境变量，不入库。发版时保留函数上已有的环境变量（控制台里配的 `WECHAT_*`、挂了 NAS 之后的 `QIYAN_DB`），只覆盖脚本自己管的几项；轮子里要有 `cryptography`（公众号安全模式），bootstrap 启动时会检查。
 
 ## 账号与数据
 

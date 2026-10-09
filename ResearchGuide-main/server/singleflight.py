@@ -66,6 +66,7 @@ class AsyncFlight:
         max_pending：同时在做或在排队的不同 key 最多几个，超了抛 Overloaded（不传不限）。"""
         self._tasks: dict[Hashable, asyncio.Future] = {}
         self._waiters: dict[asyncio.Future, int] = {}
+        self._jobs: dict[asyncio.Future, Any] = {}  # task → 线程池里真正的活（concurrent Future）；默认池拿不到，记 None
         self._executor = executor
         self.max_pending = max_pending
 
@@ -74,14 +75,21 @@ class AsyncFlight:
         if task is None:
             if self.max_pending is not None and len(self._tasks) >= self.max_pending:
                 raise Overloaded(key)
-            loop = asyncio.get_running_loop()
-            task = asyncio.ensure_future(loop.run_in_executor(self._executor, functools.partial(fn, *args)))
+            job = None
+            if self._executor is not None:
+                job = self._executor.submit(functools.partial(fn, *args))
+                task = asyncio.wrap_future(job)
+            else:
+                loop = asyncio.get_running_loop()
+                task = asyncio.ensure_future(loop.run_in_executor(None, functools.partial(fn, *args)))
             self._tasks[key] = task
+            self._jobs[task] = job
 
             def forget(done: asyncio.Future, k: Hashable = key) -> None:
                 if self._tasks.get(k) is done:
                     del self._tasks[k]
                 self._waiters.pop(done, None)
+                self._jobs.pop(done, None)
                 if not done.cancelled():
                     done.exception()  # 标记已取走，等的人都走了也不报「异常没人取」
 
@@ -95,8 +103,11 @@ class AsyncFlight:
                 self._waiters[task] = left
             else:
                 self._waiters.pop(task, None)
-                if not task.done():
-                    task.cancel()  # 等的人都走了：还在排队的不做了（已经在跑的停不下，跑完结果丢掉）
+                job = self._jobs.get(task)
+                if not task.done() and (job is None or job.cancel()):
+                    task.cancel()  # 等的人都走了：还在排队的不做了
+                # 已经在跑的停不下：留着这个 key 到它跑完。原来照样从表里删掉，同一篇论文再有人要就再占一个线程重跑，
+                # 四个线程能全被同一篇占住，别的论文干等（Codex 复现）。现在后来的人直接接着等这一个
 
     def in_flight(self) -> int:
         return len(self._tasks)

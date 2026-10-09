@@ -1117,16 +1117,21 @@ async function portraitBar() {
     name.type = "button";
     name.onclick = async () => {
       if (p.active) return;
+      // 服务器切成功了才改前端记着的画像：原来先改，切失败时任务区显示 B 的教程、却在 A 里建任务（Codex 复现）
+      try {
+        await api("POST", "/api/portraits/activate", { uid: S.uid, id: p.id });
+      } catch (e) { toast(e.message); return; }
       S.portraitId = p.id;
-      await api("POST", "/api/portraits/activate", { uid: S.uid, id: p.id });
       setView(S.view === "confirm" ? "confirm" : "dialogue");
     };
     const del = el("button", "portrait-x", "删除");
     del.type = "button";
     del.onclick = async () => {
       if (!window.confirm(`删除「${p.name}」？这份画像的对话和记录都会清掉，不能恢复。`)) return;
+      try {
+        await api("DELETE", `/api/portraits/${encodeURIComponent(p.id)}?uid=${S.uid}`);
+      } catch (e) { toast(e.message); return; }
       S.portraitId = "";
-      await api("DELETE", `/api/portraits/${p.id}?uid=${S.uid}`);
       setView("dialogue");
     };
     chip.append(name, del);
@@ -1135,7 +1140,8 @@ async function portraitBar() {
   const add = el("button", "portrait-add", "新建");
   add.type = "button";
   add.onclick = async () => {
-    const created = await api("POST", "/api/portraits", { uid: S.uid });
+    let created;
+    try { created = await api("POST", "/api/portraits", { uid: S.uid }); } catch (e) { toast(e.message); return; }
     const active = (created.portraits || []).find((item) => item.active);
     S.portraitId = active ? active.id : "";
     setView("dialogue");
@@ -2156,17 +2162,22 @@ async function renderCards() {
 
   const chooseFocus = async () => {
     if (!window.RG_DIR || !RG_DIR.byId[focus]) { toast("先点树上的一个方向"); return; }
-    const backend = RG_DIR.backendCode(focus);
-    const field = tutorialOf(focus) || FIELD_TREES[backend];
+    // 发请求前把选的节点、后端方向、画像都记下：请求在路上时又点了别的节点，原来会把那个节点存成方向（Codex 复现）
+    const target = focus;
+    const portrait = S.portraitId;
+    const backend = RG_DIR.backendCode(target);
+    const field = tutorialOf(target) || FIELD_TREES[backend];
     try {
       await api("POST", "/api/directions/choose", { uid: S.uid, code: backend });
-      const switching = !!(chosenDir && chosenDir !== focus);
-      saveTrail({ code: backend, dir: focus, done: [], tasks: {} }, true);
+      if (S.portraitId !== portrait) return;  // 期间切了画像：这次确认已经不属于眼前这份画像
+      const switching = !!(chosenDir && chosenDir !== target);
+      saveTrail({ code: backend, dir: target, done: [], tasks: {} }, true);
       chosenCode = backend;
-      chosenDir = focus;
+      chosenDir = target;
+      const name = dirTitle(target) || "未选方向";
       toast(switching
-        ? `已切换到「${viewName()}」${field ? `，教程从「${entryNode(field).label}」重新开始` : ""}`
-        : `已确认「${viewName()}」${field ? `，教程从「${entryNode(field).label}」开始` : ""}`);
+        ? `已切换到「${name}」${field ? `，教程从「${entryNode(field).label}」重新开始` : ""}`
+        : `已确认「${name}」${field ? `，教程从「${entryNode(field).label}」开始` : ""}`);
       document.getElementById("nodeSheet")?.remove();
       picked = null;
       S.dirPicked = null;
@@ -3714,12 +3725,15 @@ async function paintStatement(seq, body) {
   body.appendChild(panel);
 
   let timer = null;
+  let checkGen = 0;  // 每次编辑加一；回来的检查结果编号不是最新的就丢掉
   async function check() {
     clearTimeout(timer);
+    const gen = ++checkGen;
     timer = setTimeout(async () => {
       let r;
       try { r = await api("POST", "/api/statement", { uid: S.uid, kit: S.kitId, x_ref: state.x_ref, x_text: state.x_text, y: state.y, dry_run: true }); } catch (_) { return; }
-      if (stale(seq)) return;
+      // 旧的检查可能比新的晚回来（服务器按到达先后排队），原来会用旧结果把「保存」又禁掉（Codex 复现）
+      if (stale(seq) || gen !== checkGen) return;
       checks.innerHTML = "";
       r.checks.forEach((c) => {
         const mark = c.pass ? "✓" : c.level === "hint" ? "·" : "!";

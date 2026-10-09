@@ -46,7 +46,7 @@ import userlock
 import workbench
 from pku_adapter import search_courses
 from limits import TTLCache
-from singleflight import AsyncFlight
+from singleflight import AsyncFlight, Overloaded
 
 WEB_DIR = Path(__file__).resolve().parent.parent / "web"
 
@@ -738,14 +738,32 @@ def curriculum_stats():
 #   · DSH 的 dsh-mcp-client 配置见 docs/DEPARTMENT_KNOWLEDGE.md §4.4
 #   · stdio：python server/mcp_curriculum.py
 
+MCP_MAX_BODY = 64 * 1024   # 正常的工具调用几百字节
+MCP_MAX_BATCH = 16         # 一次批量最多几条
+MCP_PER_IP_HOUR = 600
+
+
 @app.post("/mcp")
 async def mcp_endpoint(request: Request):
+    """公开接口（只读课程知识）。原来在事件循环上同步算：一个 1.7 KB 的匿名批量请求能把整个服务卡住 3.7 秒。
+    现在：请求体和批量条数有上限，按来源限次，计算放到工作线程。"""
+    if not auth.allow_ip(request, "mcp", MCP_PER_IP_HOUR):
+        return JSONResponse({"jsonrpc": "2.0", "id": None,
+                             "error": {"code": -32000, "message": "too many requests"}}, status_code=429)
     try:
-        payload = await request.json()
+        raw = await _read_capped(request, MCP_MAX_BODY, f"request body over {MCP_MAX_BODY // 1024} KB")
+        payload = json.loads(raw)
+    except HTTPException as exc:
+        return JSONResponse({"jsonrpc": "2.0", "id": None,
+                             "error": {"code": -32600, "message": str(exc.detail)}}, status_code=413)
     except Exception:                                          # noqa: BLE001
         return JSONResponse({"jsonrpc": "2.0", "id": None,
                              "error": {"code": -32700, "message": "parse error"}}, status_code=200)
-    resp = mcp_curriculum.http_handle(payload)
+    if isinstance(payload, list) and len(payload) > MCP_MAX_BATCH:
+        return JSONResponse({"jsonrpc": "2.0", "id": None,
+                             "error": {"code": -32600, "message": f"batch too large (max {MCP_MAX_BATCH})"}},
+                            status_code=413)
+    resp = await run_in_threadpool(mcp_curriculum.http_handle, payload)
     if resp is None:                                            # 通知类消息：按 MCP 规范回 202
         return Response(status_code=202)
     return JSONResponse(resp)
@@ -845,10 +863,10 @@ _review_pending = 0  # 这两个计数只在事件循环线程里改，不用锁
 _uploads = 0
 
 
-async def _read_capped(request: Request, limit: int) -> bytes:
+async def _read_capped(request: Request, limit: int, too_big: str | None = None) -> bytes:
     """边收边数，超过上限立刻停（原来先把整个请求体读进内存再判断大小）。
     慢网照样能传完：只在「很久没收到数据」或「总时间太长」时断开，不按固定的几十秒一刀切。"""
-    too_big = f"压缩包超过 {limit // 1024 // 1024} MB。大数据集请只放样例，并在 README 里写下载链接。"
+    too_big = too_big or f"压缩包超过 {limit // 1024 // 1024} MB。大数据集请只放样例，并在 README 里写下载链接。"
     declared = request.headers.get("content-length", "")
     if declared.isdigit() and int(declared) > limit:
         raise HTTPException(413, too_big)
@@ -929,17 +947,22 @@ def _reading(fn, *args):
 
 # 共享的活按种类分开线程池：arXiv 要排限速锁（每次至少隔 3 秒），几篇不同的论文就能把线程全占在等锁上；
 # 分开以后，等 arXiv 的不会拖住课程检索和建引文索引
+# max_pending：同时在做或在排队的不同请求最多几个。原来不封顶：一个人连发 120 个不同论文号，
+# 就排上 120 个抓取任务，请求取消了任务还留在队列里（Codex 复现）。
 _FLIGHTS = {
-    "arxiv": AsyncFlight(ThreadPoolExecutor(max_workers=4, thread_name_prefix="arxiv")),
-    "index": AsyncFlight(ThreadPoolExecutor(max_workers=2, thread_name_prefix="index")),
-    "courses": AsyncFlight(ThreadPoolExecutor(max_workers=4, thread_name_prefix="courses")),
+    "arxiv": AsyncFlight(ThreadPoolExecutor(max_workers=4, thread_name_prefix="arxiv"), max_pending=32),
+    "index": AsyncFlight(ThreadPoolExecutor(max_workers=2, thread_name_prefix="index"), max_pending=16),
+    "courses": AsyncFlight(ThreadPoolExecutor(max_workers=4, thread_name_prefix="courses"), max_pending=32),
 }
 _FLIGHT_OF = {"paper": "arxiv", "daily": "arxiv", "index": "index", "courses": "courses"}
 
 
 async def _shared(key: tuple, fn, *args):
     """多人同时要同一份数据：只有一个线程去做，其余在事件循环里等结果，不各占一个工作线程。"""
-    return await _FLIGHTS[_FLIGHT_OF[key[0]]].do(key, _reading, fn, *args)
+    try:
+        return await _FLIGHTS[_FLIGHT_OF[key[0]]].do(key, _reading, fn, *args)
+    except Overloaded as exc:
+        raise HTTPException(503, "现在取数据的人太多，过一会儿再试") from exc
 
 
 def _payload_of(p: dict) -> dict:

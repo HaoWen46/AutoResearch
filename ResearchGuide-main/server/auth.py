@@ -51,7 +51,7 @@ PUBLIC = frozenset({
     "/api/explore/courses", "/api/explore/teachers", "/api/explore/majors", "/api/explore/major",
     "/api/explore/minor", "/api/explore/course", "/api/curriculum/match", "/api/curriculum/stats",
     "/mcp", "/api/projects/sources", "/api/paths", "/api/kits", "/api/kits/{kit_id}",
-    "/api/papers/{arxiv_id}", "/api/brief",
+    "/api/brief",
     "/api/llm/connect",  # 自己核对管理员口令
 })
 
@@ -172,8 +172,13 @@ def _note(key: str) -> None:
 
 
 def _ip_allows(request: Request, kind: str) -> bool:
+    return allow_ip(request, kind, PER_IP_HOUR)
+
+
+def allow_ip(request: Request, kind: str, limit: int) -> bool:
+    """同一来源一小时最多 limit 次（来源认不出时不限，见 _client_ip）。"""
     ip = _client_ip(request)
-    return True if ip is None else _allow(f"{kind}:{ip}", PER_IP_HOUR)
+    return True if ip is None else _allow(f"{kind}:{ip}", limit)
 
 
 def _dev() -> bool:

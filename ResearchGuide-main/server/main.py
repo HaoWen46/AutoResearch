@@ -42,6 +42,7 @@ import reading
 import store
 import submission
 import transcript
+import userlock
 import workbench
 from pku_adapter import search_courses
 from limits import TTLCache
@@ -68,6 +69,30 @@ app = FastAPI(title="启研 · AI Research Mentor (W0 Demo)", version="0.1.0", d
               lifespan=_lifespan)
 store.init_db()
 app.include_router(auth.router)
+
+
+BUSY_MSG = "上一件事还在处理（比如正在等模型回话），稍后再试"
+
+
+async def _serial(request: Request):
+    """会改这个人数据的接口挂这个依赖：执行期间拿着这个人的锁（userlock.py）。
+    等锁放在工作线程里，不占事件循环；等不到回 409。"""
+    uid = auth.me(request)
+    if not uid:
+        yield
+        return
+    cm = userlock.hold(uid)
+    try:
+        await run_in_threadpool(cm.__enter__)
+    except userlock.Busy as exc:
+        raise HTTPException(409, BUSY_MSG) from exc
+    try:
+        yield
+    finally:
+        cm.__exit__(None, None, None)
+
+
+SERIAL = [Depends(_serial)]
 
 
 @app.exception_handler(sqlite3.IntegrityError)
@@ -236,13 +261,13 @@ def _user_or_404(uid: str) -> dict:
 
 # ---------- onboarding ----------
 
-@app.post("/api/onboard/start")
+@app.post("/api/onboard/start", dependencies=SERIAL)
 def onboard_start(req: NBAReq):
     _user_or_404(req.uid)
     return onboarding.start(req.uid)
 
 
-@app.post("/api/onboard/message")
+@app.post("/api/onboard/message", dependencies=SERIAL)
 def onboard_message(req: OnboardMsgReq):
     _user_or_404(req.uid)
     state = store.get_onboard_state(req.uid)
@@ -298,7 +323,7 @@ def onboard_result(uid: str):
             "state": store.get_onboard_state(uid)}
 
 
-@app.post("/api/onboard/confirm")
+@app.post("/api/onboard/confirm", dependencies=SERIAL)
 def onboard_confirm(req: OnboardConfirmReq):
     _user_or_404(req.uid)
     confirmed = onboarding.confirm(req.uid, req.edits)
@@ -307,7 +332,7 @@ def onboard_confirm(req: OnboardConfirmReq):
 
 # ---------- 对话内核（任务2：环境观察 → 决策 → 工具 → 记忆）----------
 
-@app.post("/api/dialogue/turn")
+@app.post("/api/dialogue/turn", dependencies=SERIAL)
 def dialogue_turn(req: DialogueTurnReq):
     _user_or_404(req.uid)
     if not req.message.strip():
@@ -335,9 +360,12 @@ def dialogue_stream(req: DialogueTurnReq):
 
     def gen():
         try:
-            for kind, payload in dialogue.turn_steps(req.uid, req.message,
-                                                     req.conversation_id, stream_reply=True):
-                yield _sse(kind, payload)
+            with userlock.hold(req.uid):  # 整轮拿着这个人的锁：等模型时切画像、并发再发一句，都会等它做完
+                for kind, payload in dialogue.turn_steps(req.uid, req.message,
+                                                         req.conversation_id, stream_reply=True):
+                    yield _sse(kind, payload)
+        except userlock.Busy:
+            yield _sse("error", {"error": BUSY_MSG})
         except ValueError as exc:
             yield _sse("error", {"error": str(exc)})
         except Exception as exc:  # 流已经开始，不能再抛 HTTP 错误，只能作为事件送出去
@@ -347,7 +375,7 @@ def dialogue_stream(req: DialogueTurnReq):
                              headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
 
-@app.post("/api/dialogue/action")
+@app.post("/api/dialogue/action", dependencies=SERIAL)
 def dialogue_action(req: DialogueActionReq):
     _user_or_404(req.uid)
     try:
@@ -412,7 +440,7 @@ def transcript_parse(req: TranscriptParseReq):
     }
 
 
-@app.post("/api/me/transcript")
+@app.post("/api/me/transcript", dependencies=SERIAL)
 def transcript_commit(req: TranscriptCommitReq):
     """确认后落库。`mode=replace`（默认，整表替换）或 `append`（跳过完全重复）。"""
     _user_or_404(req.uid)
@@ -460,7 +488,7 @@ def transcript_get(uid: str):
     return transcript_board(uid)
 
 
-@app.delete("/api/me/enrollments/{eid}")
+@app.delete("/api/me/enrollments/{eid}", dependencies=SERIAL)
 def enrollment_delete(uid: str, eid: str):
     _user_or_404(uid)
     if not store.delete_enrollment(uid, eid):
@@ -484,7 +512,7 @@ def transcript_board(uid: str) -> dict:
     }
 
 
-@app.post("/api/portraits")
+@app.post("/api/portraits", dependencies=SERIAL)
 def portraits_create(req: PortraitReq):
     _user_or_404(req.uid)
     store.open_new_portrait(req.uid)
@@ -492,7 +520,7 @@ def portraits_create(req: PortraitReq):
     return {"portraits": store.list_portraits(req.uid)}
 
 
-@app.post("/api/portraits/activate")
+@app.post("/api/portraits/activate", dependencies=SERIAL)
 def portraits_activate(req: PortraitReq):
     _user_or_404(req.uid)
     if not req.id:
@@ -504,7 +532,7 @@ def portraits_activate(req: PortraitReq):
     return {"portraits": store.list_portraits(req.uid)}
 
 
-@app.delete("/api/portraits/{pid}")
+@app.delete("/api/portraits/{pid}", dependencies=SERIAL)
 def portraits_delete(pid: str, uid: str):
     _user_or_404(uid)
     try:
@@ -538,7 +566,7 @@ def direction_cards(req: NBAReq):
     return {"cards": planner.direction_cards(req.uid, with_courses=True)}
 
 
-@app.post("/api/directions/choose")
+@app.post("/api/directions/choose", dependencies=SERIAL)
 def choose_direction(req: ChooseDirectionReq):
     _user_or_404(req.uid)
     if req.code not in planner.DIRECTIONS:
@@ -549,7 +577,7 @@ def choose_direction(req: ChooseDirectionReq):
 
 # ---------- tasks / workbench ----------
 
-@app.post("/api/tasks/generate")
+@app.post("/api/tasks/generate", dependencies=SERIAL)
 def task_generate(req: TaskGenerateReq):
     _user_or_404(req.uid)
     if req.direction not in planner.DIRECTIONS:
@@ -573,7 +601,7 @@ def task_list(uid: str):
     return {"tasks": [t.to_dict() for t in store.list_tasks(uid)]}
 
 
-@app.post("/api/tasks/{tid}/submit")
+@app.post("/api/tasks/{tid}/submit", dependencies=SERIAL)
 def task_submit(tid: str, req: SubmitReq):
     _user_or_404(req.uid)
     t = store.get_task(tid)
@@ -605,7 +633,7 @@ def me_fact(fid: str, uid: str):
     return f.to_dict()
 
 
-@app.patch("/api/me/facts/{fid}")
+@app.patch("/api/me/facts/{fid}", dependencies=SERIAL)
 def me_fact_patch(fid: str, req: FactPatchReq):
     """用户自己改一条记忆。
 
@@ -627,7 +655,7 @@ def me_fact_patch(fid: str, req: FactPatchReq):
     return f2.to_dict() if f2 else {}
 
 
-@app.delete("/api/me/facts/{fid}")
+@app.delete("/api/me/facts/{fid}", dependencies=SERIAL)
 def me_fact_delete(fid: str, uid: str):
     """用户删掉一条记忆。不硬删：置为 retracted 并留 revision，可追溯。"""
     f = store.get_fact(fid)
@@ -761,7 +789,7 @@ def project_search(req: ProjectSearchReq):
     return projects.search(req.uid, req.direction, req.stage, req.keywords, req.node, req.path_step)
 
 
-@app.post("/api/projects/pick")
+@app.post("/api/projects/pick", dependencies=SERIAL)
 def project_pick(req: ProjectPickReq):
     _user_or_404(req.uid)
     try:
@@ -847,7 +875,19 @@ def _review_and_record(uid: str, p: dict, data: bytes) -> dict:
         result = submission.review(data, p)
     except submission.SubmissionError as exc:
         raise HTTPException(400, str(exc)) from exc
-    result["fact"] = projects.record_review(uid, p, result)
+    # 记录时才拿锁，并且按「现在」的项目来记：评阅要几十秒，这期间可能有另一次评阅记进去了（原来后一次会把前一次覆盖掉），
+    # 也可能画像切走了（原来会把这个项目写进新画像）
+    try:
+        with userlock.hold(uid):
+            current = store.get_project(uid, p["id"])
+            if current is None:
+                result["recorded"] = False
+                result["note"] = "评阅期间切换了画像或删了这个项目，这次评阅没有记进项目"
+                return result
+            result["fact"] = projects.record_review(uid, current, result)
+    except userlock.Busy as exc:
+        raise HTTPException(409, BUSY_MSG) from exc
+    result["recorded"] = True
     return result
 
 
@@ -972,7 +1012,7 @@ async def daily_feed(uid: str, kit: str):
     return await run_in_threadpool(_daily_payload, uid, kit, source)
 
 
-@app.post("/api/daily/triage")
+@app.post("/api/daily/triage", dependencies=SERIAL)
 async def daily_triage(req: TriageReq):
     await run_in_threadpool(_user_or_404, req.uid)
     source = await _daily_source_for(req.kit)
@@ -1004,7 +1044,7 @@ def _card_submit(req: CardReq) -> dict:
     return _reading(reading.submit_card, req.uid, req.kit, req.arxiv_id, req.fields, req.dims, req.decision_log)
 
 
-@app.post("/api/cards")
+@app.post("/api/cards", dependencies=SERIAL)
 async def card_submit(req: CardReq):
     aid = _reading(reading.arxiv.clean_id, req.arxiv_id)
     await run_in_threadpool(_user_or_404, req.uid)
@@ -1035,13 +1075,13 @@ def edges_list(uid: str):
     return positioning.edges(uid)
 
 
-@app.post("/api/edges")
+@app.post("/api/edges", dependencies=SERIAL)
 def edges_add(req: EdgeReq):
     _user_or_404(req.uid)
     return _reading(positioning.add_edge, req.uid, req.kind, req.text, req.evidence_url)
 
 
-@app.delete("/api/edges/{edge_id}")
+@app.delete("/api/edges/{edge_id}", dependencies=SERIAL)
 def edges_delete(edge_id: str, uid: str):
     _user_or_404(uid)
     return _reading(positioning.delete_edge, uid, edge_id)
@@ -1054,7 +1094,7 @@ def channels_map(uid: str, direction: str):
     return positioning.channel_map(uid, direction)
 
 
-@app.post("/api/channels/toggle")
+@app.post("/api/channels/toggle", dependencies=SERIAL)
 def channels_toggle(req: ChannelReq):
     _user_or_404(req.uid)
     return _reading(positioning.toggle_channel, req.uid, req.id, req.on, req.direction)
@@ -1072,7 +1112,7 @@ def statement_get(uid: str, kit: str):
     return _reading(positioning.statement, uid, kit)
 
 
-@app.post("/api/statement")
+@app.post("/api/statement", dependencies=SERIAL)
 def statement_save(req: StatementReq):
     """dry_run=true 只跑检查不保存，给编辑时实时提示用。"""
     _user_or_404(req.uid)
@@ -1087,13 +1127,13 @@ def bets_list(uid: str):
     return positioning.bets(uid)
 
 
-@app.post("/api/bets")
+@app.post("/api/bets", dependencies=SERIAL)
 def bets_add(req: BetReq):
     _user_or_404(req.uid)
     return _reading(positioning.add_bet, req.uid, req.name, req.kind, req.tier, req.kit, req.niche)
 
 
-@app.post("/api/bets/{bet_id}/close")
+@app.post("/api/bets/{bet_id}/close", dependencies=SERIAL)
 def bets_close(bet_id: str, req: BetCloseReq):
     _user_or_404(req.uid)
     return _reading(positioning.close_bet, req.uid, bet_id, req.outcome, req.reason)

@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import asyncio
+import atexit
 import contextvars
 import functools
 import hmac
@@ -63,6 +64,7 @@ THREADS = int(os.environ.get("QIYAN_THREADS") or 128)
 MODEL_THREADS = int(os.environ.get("QIYAN_MODEL_THREADS") or os.environ.get("QIYAN_TURN_THREADS") or 96)
 MODEL_QUEUE = int(os.environ.get("QIYAN_MODEL_QUEUE") or 160)
 _MODEL = workpool.BoundedPool(MODEL_THREADS, MODEL_QUEUE, "model")
+atexit.register(_MODEL.drain)  # 没走 lifespan 的退出（直接跑脚本、测试）也等在跑的活做完
 CROWDED_MSG = "现在用的人太多，模型那边在排队。请过一会儿再试"
 
 
@@ -95,6 +97,7 @@ async def _lifespan(_app: FastAPI):
         print(json.dumps({"warn": "db_ephemeral", "msg": "库在临时盘上，实例回收会丢掉所有账号和记录；设 QIYAN_DB 指到持久盘"},
                          ensure_ascii=False))
     yield
+    await anyio.to_thread.run_sync(_MODEL.drain)  # 还在跑的模型活（浏览器走了照样在写的那一轮）做完再退
 
 
 # 每个接口先过 auth.guard：公开的放行，其余要登录，且请求里的 uid 必须是登录的这个人
@@ -453,6 +456,8 @@ async def dialogue_stream(req: DialogueTurnReq):
         """响应结束了。这一轮要是还在排队（浏览器没等到就走了），撤掉、放锁；已经在跑或跑完的不动。"""
         if fut.cancel():
             ticket.release()
+
+    fut.add_done_callback(lambda f: f.cancelled() and put(None))  # 被别处撤掉（服务在关）：响应结束，abandon 放锁
 
     async def relay():
         while True:
@@ -941,6 +946,15 @@ def _project_or_404(uid: str, pid: str) -> dict:
     return p
 
 
+def _project_in_portrait_or_404(uid: str, pid: str) -> tuple[dict, str]:
+    """项目和「现在是哪个画像」一次读出来（store.project_in_portrait）。"""
+    _user_or_404(uid)
+    p, portrait = store.project_in_portrait(uid, pid)
+    if not p:
+        raise HTTPException(404, "project not found")
+    return p, portrait
+
+
 @app.get("/api/projects/{pid}")
 def project_get(pid: str, uid: str):
     return _project_or_404(uid, pid)
@@ -1021,13 +1035,18 @@ def _review_and_record(uid: str, p: dict, data: bytes, portrait: str = "") -> di
 
 
 @app.post("/api/projects/{pid}/submit")
-async def project_submit(pid: str, uid: str, request: Request):
-    """请求体就是 .zip 本身（Content-Type: application/zip），不需要 multipart 依赖。"""
+async def project_submit(pid: str, uid: str, request: Request, portrait: str = ""):
+    """请求体就是 .zip 本身（Content-Type: application/zip），不需要 multipart 依赖。
+    portrait：前端打开这个项目页时的画像。已经切走了就不收：同一个项目 id 在两份画像里都有时，
+    评阅会记进学生眼前不是的那一份。"""
     global _review_pending, _uploads
-    # 项目和「当时是哪个画像」在收上传之前、同一个读事务里拿：原来是传完之后才看画像，
-    # 上传期间切了画像，评阅就记进新画像（Codex 复现）。不用这个人的锁：同时交几份时不该互相 409。
-    p = await run_in_threadpool(_project_or_404, uid, pid)
-    _, portrait = await run_in_threadpool(store.project_in_portrait, uid, pid)
+    # 项目和「当时是哪个画像」在收上传之前、同一个读事务里一起拿，评阅用的就是这一份项目：
+    # 原来项目另读一次，两次之间切了画像，A 的项目内容配上 B 的画像，评阅记进了 B（Codex 复现）。
+    # 不用这个人的锁：同时交几份时不该互相 409。
+    p, current = await run_in_threadpool(_project_in_portrait_or_404, uid, pid)
+    if portrait and portrait != current:
+        raise HTTPException(409, "画像已经切换了：这个项目页属于原来那份画像。刷新页面再交。")
+    portrait = current
     if _uploads >= UPLOADS_MAX or _review_pending >= REVIEW_PENDING_MAX:
         raise HTTPException(503, "现在交的人太多，评阅在排队。请过一两分钟再交。")
     _uploads += 1

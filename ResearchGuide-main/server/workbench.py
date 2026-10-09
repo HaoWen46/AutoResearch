@@ -9,6 +9,8 @@ W1 真实化（刘弘雅）：任务模板库扩充 + rubric 判定换 LLM，sch
 """
 from __future__ import annotations
 
+import math
+import re
 from typing import Any
 
 import llm
@@ -325,6 +327,27 @@ _ACTION_TASK_FALLBACK = {
 }
 
 
+def _as_int(v: Any, default: int, lo: int, hi: int) -> int:
+    """模型给的数字：20、20.0、"20"、"20分钟"、"约 20-30 分钟" 都取第一个数；取不到用默认值。"""
+    if isinstance(v, bool):
+        return default
+    if isinstance(v, (int, float)) and math.isfinite(v):
+        n = int(v)
+    else:
+        m = re.search(r"\d+", str(v or ""))
+        if not m:
+            return default
+        n = int(m.group()[:6])
+    return min(hi, max(lo, n))
+
+
+def _as_list(v: Any) -> list:
+    """模型给的列表：一个字符串当一项，不是列表的丢掉。"""
+    if isinstance(v, str):
+        return [v] if v.strip() else []
+    return [x for x in v if x not in (None, "")] if isinstance(v, list) else []
+
+
 def task_from_action(uid: str, action: dict[str, Any]) -> MicroTask:
     """把一张对话行动卡变成任务区里能完成的真任务。
 
@@ -340,25 +363,26 @@ def task_from_action(uid: str, action: dict[str, Any]) -> MicroTask:
     kind = (action.get("action") or "").strip()
     sk = _ACTION_TASK_SKELETON.get(kind) or _ACTION_TASK_FALLBACK
     payload = action.get("payload") or {}
-    if isinstance(payload, str):
+    if not isinstance(payload, dict):
         payload = {}
 
-    # 模型若在 payload 里给了更具体的，就用它的；否则用骨架
-    steps = payload.get("steps") or sk["steps"]
+    # 模型若在 payload 里给了更具体的，就用它的；否则用骨架。模型给的形状不一定对（「20分钟」、一整段字符串当步骤），
+    # 原来直接 int()/逐个迭代：接受行动时报错，行动已经记成「已接受」却没有任务，学生卡在「去任务区完成」（Codex 复现）。
+    steps = _as_list(payload.get("steps")) or sk["steps"]
     deliverable = payload.get("deliverable") or sk["deliverable"]
-    rubric = payload.get("rubric") or sk["rubric"]
+    rubric = _as_list(payload.get("rubric")) or sk["rubric"]
 
     task = MicroTask(
         user_id=uid,
         direction=action.get("direction") or "",
         title=title[:60],
-        brief=payload.get("brief") or title[:240],
+        brief=str(payload.get("brief") or title)[:240],
         steps=[str(s)[:200] for s in steps][:6],
         deliverable=str(deliverable)[:240],
         rubric=[{"criterion": str(r.get("criterion", r))[:160]} if isinstance(r, dict)
                 else {"criterion": str(r)[:160]} for r in rubric][:6],
-        time_budget_min=int(payload.get("time_budget_min") or 20),
-        difficulty=int(payload.get("difficulty") or 1),
+        time_budget_min=_as_int(payload.get("time_budget_min"), 20, 5, 240),
+        difficulty=_as_int(payload.get("difficulty"), 1, 1, 5),
         status="open",
         origin="dialogue",
         action_id=aid,

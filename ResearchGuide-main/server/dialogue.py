@@ -1078,13 +1078,13 @@ def action_event(uid: str, action_id: str, event: str) -> dict[str, Any] | None:
     a = store.get_action(uid, action_id)
     if not a:
         return None
+    # 先建任务、再记「已接受」：原来反过来，建任务出错时行动已经是「已接受」、却没有任务，
+    # 刷新后只剩「去任务区完成」，任务区什么都没有（Codex 复现）。建任务是幂等的：同一张卡重复 accept 不会造出第二个。
+    task = workbench.task_from_action(uid, a) if target == "accepted" else None
     store.update_action(uid, action_id, target)
     store.add_event(uid, f"action_{target}", source_id=action_id, payload={"action": a["action"]})
 
-    task = None
-    if target == "accepted":
-        # 建任务本身是幂等的：同一张卡重复 accept 不会造出第二个
-        task = workbench.task_from_action(uid, a)
+    if task is not None:
         store.add_event(uid, "task_created", source_id=action_id,
                         payload={"task_id": task.id, "origin": task.origin})
     elif target == "completed":

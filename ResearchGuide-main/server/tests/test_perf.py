@@ -57,7 +57,7 @@ def _dns_idle(timeout: float = 5.0) -> None:
 
 
 def test_review_runs_off_the_event_loop(monkeypatch):
-    monkeypatch.setattr(main, "_project_or_404", lambda uid, pid: {"id": pid})
+    monkeypatch.setattr(main, "_project_in_portrait_or_404", lambda uid, pid: ({"id": pid}, ""))
     monkeypatch.setattr(submission, "review", lambda data, p: time.sleep(BLOCK) or {"passed": 0})
     monkeypatch.setattr(projects, "record_review", lambda uid, p, r: None)
 
@@ -75,7 +75,7 @@ def test_review_runs_off_the_event_loop(monkeypatch):
 
 
 def test_upload_limit_stops_reading_early(monkeypatch):
-    monkeypatch.setattr(main, "_project_or_404", lambda uid, pid: {"id": pid})
+    monkeypatch.setattr(main, "_project_in_portrait_or_404", lambda uid, pid: ({"id": pid}, ""))
     monkeypatch.setattr(submission, "MAX_ZIP_BYTES", 1000)
     sent = []
 
@@ -95,7 +95,7 @@ def test_upload_limit_stops_reading_early(monkeypatch):
 
 
 def test_review_queue_is_bounded(monkeypatch):
-    monkeypatch.setattr(main, "_project_or_404", lambda uid, pid: {"id": pid})
+    monkeypatch.setattr(main, "_project_in_portrait_or_404", lambda uid, pid: ({"id": pid}, ""))
     monkeypatch.setattr(main, "_review_pending", main.REVIEW_PENDING_MAX)
 
     async def go():
@@ -299,7 +299,7 @@ def test_external_reads_have_a_total_deadline_and_byte_cap(trickle, monkeypatch)
 
 
 def test_stalled_uploads_time_out_and_do_not_block_ready_ones(monkeypatch):
-    monkeypatch.setattr(main, "_project_or_404", lambda uid, pid: {"id": pid})
+    monkeypatch.setattr(main, "_project_in_portrait_or_404", lambda uid, pid: ({"id": pid}, ""))
     monkeypatch.setattr(main, "UPLOAD_IDLE_SECONDS", 0.3)
     monkeypatch.setattr(submission, "review", lambda data, p: {"passed": 1})
     monkeypatch.setattr(projects, "record_review", lambda uid, p, r: None)
@@ -917,7 +917,7 @@ def test_arxiv_waits_do_not_starve_course_searches(monkeypatch):
 
 
 def test_slow_but_steady_uploads_finish_and_total_is_capped(monkeypatch):
-    monkeypatch.setattr(main, "_project_or_404", lambda uid, pid: {"id": pid})
+    monkeypatch.setattr(main, "_project_in_portrait_or_404", lambda uid, pid: ({"id": pid}, ""))
     monkeypatch.setattr(main, "UPLOAD_IDLE_SECONDS", 0.3)
     monkeypatch.setattr(submission, "review", lambda data, p: {"passed": 1})
     monkeypatch.setattr(projects, "record_review", lambda uid, p, r: None)

@@ -708,6 +708,8 @@ function portraitTabs(active) {
 
 /* 换人（退出、删号、登录过期、登进另一个账号）一律整页重载：S 里有几十个字段、对话视图里有进行中的流，
    逐个清容易漏，上一个人没发的草稿就会出现在下一个人的表单里。要去哪一页、要提示什么，经 sessionStorage 带过去。 */
+const PARK_KEY = "rg_parked";  // 停在这台浏览器上的另一个会话，见 parkedSession
+
 function reloadInto(view, msg) {
   try {
     sessionStorage.setItem("rg_next_view", view || "home");
@@ -730,7 +732,10 @@ function setSession(r, nextView, msg) {
     localStorage.setItem("rg_nick", S.nickname);
   } catch (_) { /* 存不了就只在这一页有效 */ }
   if (switching) {
-    clearLocalDrafts(["rg_uid", "rg_token", "rg_nick"]);  // 上一个人的草稿不留给这个人
+    // 上一个人的草稿不留给这个人；这个人自己的、停在这台浏览器上的另一个号（parkedSession）的留着
+    let parked = "";
+    try { parked = (JSON.parse(localStorage.getItem(PARK_KEY) || "null") || {}).uid || ""; } catch (_) { /* 坏数据当没有 */ }
+    clearLocalDrafts(["rg_uid", "rg_token", "rg_nick", PARK_KEY], [S.uid, parked]);
     reloadInto(nextView || "today", msg);
     return true;
   }
@@ -741,12 +746,13 @@ function setSession(r, nextView, msg) {
 
 /* 这台浏览器里存的个人草稿（任务草稿、阅读卡草稿、教程进度）。退出、删号、换人时清掉：
    公用电脑上，上一个人没交的阅读卡草稿原来会出现在下一个人的表单里。keep 是要留下的键（界面偏好、新登录的身份）。 */
-function clearLocalDrafts(keep) {
+function clearLocalDrafts(keep, owners) {
   try {
     const drop = [];
+    const mine = (k) => (owners || []).some((u) => u && k.includes(u));  // 草稿的键都带着 uid
     for (let i = 0; i < localStorage.length; i += 1) {
       const k = localStorage.key(i);
-      if (k && k.startsWith("rg_") && k !== "rg_kit" && !(keep || []).includes(k)) drop.push(k);
+      if (k && k.startsWith("rg_") && k !== "rg_kit" && !(keep || []).includes(k) && !mine(k)) drop.push(k);
     }
     drop.forEach((k) => localStorage.removeItem(k));
   } catch (_) { /* 无痕模式等 */ }
@@ -920,14 +926,53 @@ async function startWechat(box, opts) {
       return;
     }
     stopWxPoll();
+    if (res.left_guest && S.uid && S.guest && res.uid !== S.uid) { askLeaveGuest(box, res); return; }
     const previous = S.token;  // 采用新令牌之后再吊销旧的；被当成过期尝试丢掉的结果不会走到这里
     if (previous && previous !== res.token) revokeToken(previous);
-    if (setSession(res, "today", "这个微信已经有账号，已登进去；刚才访客的记录留在访客号里")) return;
+    if (setSession(res, "today")) return;
     toast(res.bound ? "绑定好了，记录都在" : `你好，${res.nickname}`);
     if (res.bound) { setView("me"); return; }
     await afterLogin(res.created);
   };
   wxPoll = setTimeout(tick, 2000);
+}
+
+/* 访客来绑微信，这个微信却已经有账号：访客的记录不会合并过去。先问；要登进微信账号，访客号的会话停在这台浏览器上，
+   「记录」页可以切回去。原来直接切走、吊销访客令牌、清掉草稿，访客的记录再也进不去（Codex 复现）。 */
+function askLeaveGuest(box, res) {
+  box.innerHTML = "";
+  box.appendChild(el("p", "wx-status",
+    `这个微信已经有账号「${esc(res.nickname)}」了。访客号「${esc(S.nickname)}」的记录不会合并过去。`));
+  const acts = el("div", "account-actions");
+  const go = el("button", "btn small", "登进微信账号");
+  const stay = el("button", "btn small secondary", "留在访客号");
+  go.type = "button"; stay.type = "button";
+  go.onclick = () => {
+    parkCurrent(res.uid);
+    setSession(res, "me", "已登进微信账号。访客号的记录还在，在这一页可以切回去看");
+  };
+  stay.onclick = () => {
+    revokeToken(res.token);
+    box.hidden = true;
+    toast("还在访客号里");
+  };
+  acts.append(go, stay);
+  box.appendChild(acts);
+}
+
+/* 停在这台浏览器上的另一个会话（目前只有上面这种情况会停）。只给停放它的那个账号看：
+   公用电脑上，下一个人登进自己的号看不到、也切不过去。退出、删号时跟着清掉。键 PARK_KEY 在 reloadInto 上面。 */
+function parkedSession() {
+  try {
+    const p = JSON.parse(localStorage.getItem(PARK_KEY) || "null");
+    return p && p.owner === S.uid && p.uid && p.token && p.uid !== S.uid ? p : null;
+  } catch (_) { return null; }
+}
+function parkCurrent(owner) {
+  try {
+    localStorage.setItem(PARK_KEY, JSON.stringify({
+      uid: S.uid, token: S.token, nickname: S.nickname, guest: S.guest, wechat: S.wechat, owner }));
+  } catch (_) { /* 存不了：切过去之后就切不回来了，和原来一样 */ }
 }
 
 function renderLogin() {
@@ -1030,6 +1075,16 @@ function accountPanel() {
     acts.appendChild(b);
   };
   if (S.guest) add("绑定微信", "btn small", () => setView("login"));
+  const parked = parkedSession();
+  if (parked) {
+    box.appendChild(el("p", "form-note", parked.guest
+      ? `这台浏览器上还有访客号「${esc(parked.nickname)}」的记录（绑微信时这个微信已经有账号，没有合并过去）。`
+      : `这台浏览器上还登着微信账号「${esc(parked.nickname)}」。`));
+    add(parked.guest ? "切回访客号" : "切回微信账号", "btn small secondary", () => {
+      parkCurrent(parked.uid);
+      setSession(parked, "me", parked.guest ? "已切回访客号" : "已切回微信账号");
+    });
+  }
   add("我们存什么", "btn small ghost", () => openPrivacy(false));
   add("导出我的数据", "btn small secondary", async () => {
     const res = await apiFetch("/api/me/export");
@@ -1038,6 +1093,8 @@ function accountPanel() {
   });
   add("退出登录", "btn small secondary", async () => {
     if (S.guest && !window.confirm("访客退出后，这些记录就找不回来了（除非先绑定微信）。确定退出？")) return;
+    if (parked && parked.guest && !window.confirm(`退出后，访客号「${parked.nickname}」的记录就找不回来了。确定退出？`)) return;
+    if (parked) revokeToken(parked.token);
     await logout();
   });
   add("删除账号", "btn small ghost danger", async () => {
@@ -1705,6 +1762,7 @@ async function portraitOp(run, nextView) {
     if (r === null) return;
     const active = ((r && r.portraits) || []).find((item) => item.active);
     S.portraitId = active ? active.id : "";
+    S.myDir = undefined;  // 方向是画像的：换了画像要重新问（原来切到数学画像，研读和信息源还按 AI 提示，Codex 复现）
     setView(nextView);
   } catch (e) {
     toast(e.message);
@@ -2178,6 +2236,7 @@ async function renderCards() {
       if (S.portraitId !== portrait) return;  // 期间切了画像：这次确认已经不属于眼前这份画像
       const switching = !!(chosenDir && chosenDir !== target);
       saveTrail({ code: backend, dir: target, done: [], tasks: {} }, true);
+      S.myDir = undefined;
       chosenCode = backend;
       chosenDir = target;
       const name = dirTitle(target) || "未选方向";
@@ -3463,13 +3522,16 @@ async function renderPosition() {
   }
 }
 
-/* 学生的方向：本机轨迹优先，没有就问服务端（直接打开定位 / 研读时本机可能还没记） */
+/* 学生的方向：本机轨迹优先，没有就问服务端（直接打开定位 / 研读时本机可能还没记）。
+   问到的按画像记：问的时候切了画像，这个结果不记；没问到也不记，下次再问。 */
 async function myDirection() {
   if (trail().code) return trail().code;
-  if (S.myDir === undefined) {
-    try { S.myDir = (await api("GET", `/api/projects/context?uid=${S.uid}`)).direction || ""; } catch (_) { S.myDir = ""; }
-  }
-  return S.myDir;
+  if (S.myDir !== undefined) return S.myDir;
+  const portrait = S.portraitId;
+  let dir;
+  try { dir = (await api("GET", `/api/projects/context?uid=${S.uid}`)).direction || ""; } catch (_) { return ""; }
+  if (S.portraitId === portrait) S.myDir = dir;
+  return dir;
 }
 
 /* 学生的方向还没有工具包时如实说，并指向不依赖工具包的「信息源」 */
@@ -4203,6 +4265,7 @@ async function renderProject() {
   up.appendChild(result);
   $app.appendChild(up);
 
+  const shownIn = S.portraitId;  // 这个项目页属于哪份画像：交的时候带上，期间切走了服务器就不收
   const send = async (f) => {
     if (!f) return;
     if (!/\.zip$/i.test(f.name)) { toast("只收 .zip 文件"); return; }
@@ -4210,7 +4273,8 @@ async function renderProject() {
     drop.classList.add("busy");
     drop.querySelector("span").textContent = `正在看「${f.name}」…`;
     try {
-      const res = await apiFetch(`/api/projects/${p.id}/submit?uid=${S.uid}`, {
+      const at = shownIn ? `&portrait=${encodeURIComponent(shownIn)}` : "";
+      const res = await apiFetch(`/api/projects/${p.id}/submit?uid=${S.uid}${at}`, {
         method: "POST", headers: { "Content-Type": "application/zip" }, body: f,
       });
       const data = await res.json().catch(() => null);

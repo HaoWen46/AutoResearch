@@ -138,8 +138,9 @@ def test_a_queued_turn_is_withdrawn_when_its_browser_leaves(monkeypatch):
 
     monkeypatch.setattr(dialogue, "turn_steps", steps)
     uid = _uids(1)[0]
-    hold = threading.Event()
-    blocker = pool.submit(hold.wait, 10)  # 别人的一轮占着唯一的线程
+    hold, started = threading.Event(), threading.Event()
+    blocker = pool.submit(lambda: started.set() or hold.wait(10))  # 别人的一轮占着唯一的线程
+    assert started.wait(5)
 
     async def run():
         leave = asyncio.Event()
@@ -269,8 +270,9 @@ def test_cancelled_queued_work_is_dropped_at_once():
         pass
 
     pool = workpool.BoundedPool(1, 1, "t")
-    hold = threading.Event()
-    blocker = pool.submit(hold.wait, 10)
+    hold, started = threading.Event(), threading.Event()
+    blocker = pool.submit(lambda: started.set() or hold.wait(10))
+    assert started.wait(5)  # 等它真的占住线程：不然它还在队里，下一个 submit 就是满的
     refs = []
     try:
         for _ in range(64):
@@ -315,8 +317,9 @@ def test_a_cancelled_request_waits_for_its_running_work_before_letting_go():
         waited = anyio.run(go)
         assert done.is_set() and waited >= 0.25  # 做完才出来
 
-        hold = threading.Event()
-        blocker = pool.submit(hold.wait, 5)
+        hold, started = threading.Event(), threading.Event()
+        blocker = pool.submit(lambda: started.set() or hold.wait(5))
+        assert started.wait(5)
 
         async def go_queued():
             t0 = time.monotonic()
@@ -331,3 +334,25 @@ def test_a_cancelled_request_waits_for_its_running_work_before_letting_go():
         assert ran == [] and pool.stats()["queued"] == 0
     finally:
         main._MODEL = orig
+
+
+def test_draining_waits_for_running_work_and_drops_the_queue():
+    """服务关闭时：在跑的那一轮（浏览器走了照样在写）做完才退，排队没开始的撤掉、不再跑；关完照常接活。
+    线程是守护线程，原来不等：进程一退，写到一半就没了（Codex 复现）。"""
+    pool = workpool.BoundedPool(1, 4, "t")
+    started, wrote, ran = threading.Event(), [], []
+
+    def writing():
+        started.set()
+        time.sleep(0.3)
+        wrote.append(1)
+
+    running = pool.submit(writing)
+    queued = pool.submit(lambda: ran.append(1))
+    assert started.wait(5)
+    t0 = time.monotonic()
+    pool.drain(wait=5)
+    assert wrote == [1] and time.monotonic() - t0 >= 0.2
+    assert queued.cancelled() and ran == [] and pool.stats()["queued"] == 0
+    running.result(1)
+    assert pool.submit(lambda: 7).result(5) == 7

@@ -12,6 +12,7 @@ const ChatView = (() => {
   let busy = false;      // 正在生成，阻止重复发送
   let abort = null;      // AbortController
   let seq = 0;           // 渲染序号，切走视图后不再写 DOM
+  let turnDone = null;   // 正在生成的那一轮做完时兑现：切走再回来的新视图靠它接上
 
   const STAGE_CN = {
     observe: "正在看你的近况",
@@ -130,6 +131,7 @@ const ChatView = (() => {
 
   async function render($app) {
     const mySeq = ++seq;
+    const resumeFrom = turnDone;  // 打开这一页时上一轮还在生成（在别的页等过）：见最后
     const bar = await portraitBar();
     if (mySeq !== seq || S.view !== "dialogue") return;  // 等待期间切到了别的页：不能再往页面上写
 
@@ -214,8 +216,11 @@ const ChatView = (() => {
     /* --- 发送 --- */
     async function send(text) {
       const msg = (text || "").trim();
-      if (!msg || busy) return;
+      if (!msg) return;
+      if (busy) { toast("上一句还在生成，等它好了再发"); return; }
       busy = true;
+      let finish;
+      turnDone = new Promise((resolve) => { finish = resolve; });
       input.value = ""; autoGrow();
       input.disabled = true; sendBtn.disabled = true; stopBtn.hidden = false;
       actions.innerHTML = "";
@@ -253,10 +258,13 @@ const ChatView = (() => {
         if (mySeq === seq) {
           if (acc) { bubble.innerHTML = mdLite(acc); toast("生成中断：" + e.message); }
           else { bubble.remove(); toast(e.message); }
+        } else if (e.name !== "AbortError") {
+          toast("对话：上一句没生成完（" + e.message + "）");  // 人在别的页：页面上没地方显示，至少说一声
         }
       } finally {
         bubble.classList.remove("streaming");
-        busy = false; abort = null;
+        busy = false; abort = null; turnDone = null;
+        finish();
         if (mySeq === seq) {
           input.disabled = false; sendBtn.disabled = false; stopBtn.hidden = true;
           setStage("");
@@ -669,6 +677,18 @@ const ChatView = (() => {
     });
     sendBtn.onclick = () => send(input.value);
     stopBtn.onclick = () => { if (abort) abort.abort(); };
+
+    // 上一轮在生成时切走又回来：这个新视图里没有那一轮的气泡和进度，旧视图收到的回复也不会画到这里。
+    // 还在生成就锁住输入、给停止键；做完（不管在这之前还是之后）从服务器重取一遍历史重画。
+    // 原来发送键看着能点、点了没反应，做完的回复也不显示，要手动刷新（Codex 复现）。
+    if (resumeFrom) {
+      if (busy) {
+        input.disabled = true; sendBtn.disabled = true; stopBtn.hidden = false;
+        stageLine.textContent = "上一句还在生成，好了会自动显示…";
+        stageLine.classList.add("on");
+      }
+      resumeFrom.then(() => { if (mySeq === seq && S.view === "dialogue") render($app); });
+    }
   }
 
   return { render, mdLite };

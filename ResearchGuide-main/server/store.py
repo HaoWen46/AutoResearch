@@ -19,12 +19,16 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
+import envfile  # noqa: F401  先读 .env，下面的 QIYAN_DB 才算数
 from schemas import MicroTask, UserFact, new_id, now_iso
 
 # 部署时用 QIYAN_DB 指到持久盘（Dockerfile 指向卷 /data/qiyan.db）；不设就用仓库里的演示库。
 # 原来写死在 server/data/demo.db，Dockerfile 设的变量没人读，重建容器就丢光所有用户。
 DB_PATH = Path(os.environ.get("QIYAN_DB") or Path(__file__).resolve().parent / "data" / "demo.db")
 _LOCK = threading.Lock()
+
+
+USER_DELETED = "user deleted"  # 触发器拒绝写入时的错误信息；main 把它转成 410
 
 
 def ephemeral() -> bool:
@@ -244,6 +248,13 @@ CREATE TABLE IF NOT EXISTS wechat_tickets (
 );
 CREATE INDEX IF NOT EXISTS idx_wechat_code ON wechat_tickets(code);
 
+-- 删掉的账号留一个 id（随机串，不是个人信息）：触发器据此拒绝再往任何表里写这个人的行。
+-- 删号那一刻还在跑的请求（比如等模型回话的对话）完成后会写库；没有它，删掉的数据会被重新写回来。
+CREATE TABLE IF NOT EXISTS deleted_users (
+  id TEXT PRIMARY KEY,
+  deleted_at TEXT NOT NULL
+);
+
 CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id);
 CREATE INDEX IF NOT EXISTS idx_facts_user ON facts(user_id);
 CREATE INDEX IF NOT EXISTS idx_enroll_user ON enrollments(user_id);
@@ -304,6 +315,11 @@ def init_db() -> None:
                 c.execute(ddl)
         for ddl in _AFTER_MIGRATIONS:
             c.execute(ddl)
+        # 每张带 user_id 的表一个触发器：已删除的账号不能再插入行（以后加的表在下次启动时自动补上）
+        for t in _user_tables(c):
+            c.execute(f"CREATE TRIGGER IF NOT EXISTS trg_{t}_not_deleted BEFORE INSERT ON {t} "
+                      "WHEN EXISTS (SELECT 1 FROM deleted_users WHERE id = NEW.user_id) "
+                      f"BEGIN SELECT RAISE(ABORT, '{USER_DELETED}'); END")
 
 
 # ---------- users ----------
@@ -477,6 +493,8 @@ def delete_user(uid: str) -> dict[str, int]:
     counts: dict[str, int] = {}
     with _LOCK, _conn() as c:
         row = c.execute("SELECT wechat_openid FROM users WHERE id=?", (uid,)).fetchone()
+        # 先立墓碑（同一个事务里）：从这一刻起，还在路上的请求再写这个人的行都会被触发器拒绝
+        c.execute("INSERT OR IGNORE INTO deleted_users(id, deleted_at) VALUES(?, ?)", (uid, now_iso()))
         for t in _user_tables(c):
             counts[t] = c.execute(f"DELETE FROM {t} WHERE user_id=?", (uid,)).rowcount
         if row and row["wechat_openid"]:

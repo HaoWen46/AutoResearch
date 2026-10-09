@@ -505,3 +505,74 @@ def test_sessions_slide_forward_when_used_after_a_day(client):
     with sqlite3.connect(store.DB_PATH) as c:
         expires = c.execute("SELECT expires_at FROM sessions").fetchone()[0]
     assert expires > time.time() + auth.SESSION_TTL - 60
+
+
+# ---------- Codex 复查第一轮 ----------
+
+def test_uid_check_does_not_depend_on_the_content_type_header(client):
+    a, ta = _guest(client, "甲")
+    b, _ = _guest(client, "乙")
+    edge = json.dumps({"uid": b, "kind": "language", "text": "冒充", "evidence_url": ""}).encode()
+    for ctype in ("application/JSON", "Application/Json; charset=utf-8", "application/merge-patch+json", None):
+        headers = {**_h(ta), **({"Content-Type": ctype} if ctype else {})}
+        r = client.post("/api/edges", content=edge, headers=headers)
+        assert r.status_code == 403, (ctype, r.status_code, r.text)
+    with sqlite3.connect(store.DB_PATH) as c:
+        assert c.execute("SELECT COUNT(*) FROM edges WHERE user_id=?", (b,)).fetchone()[0] == 0
+    # 查询串里同名参数写两遍：每一个都要核
+    assert client.get(f"/api/me/facts?uid={a}&uid={b}", headers=_h(ta)).status_code == 403
+    assert client.get(f"/api/me/facts?uid={b}&uid={a}", headers=_h(ta)).status_code == 403
+
+
+def test_guessing_limit_blocks_even_a_correct_code(client, wx, monkeypatch):
+    monkeypatch.setattr(auth, "PER_OPENID_HOUR", 3)
+    s = client.post("/api/auth/wechat/start", json={}).json()
+    wrong = "000000" if s["code"] != "000000" else "111111"
+    for _ in range(3):
+        assert "没找到" in _reply(_send(client, "o_guesser", wrong))["Content"]
+    # 超限之后，就算猜中了也不能配上（原来是先配再看限额）
+    assert "太多" in _reply(_send(client, "o_guesser", s["code"]))["Content"]
+    assert client.post("/api/auth/wechat/poll", json={"ticket": s["ticket"]}).json()["pending"] is True
+    # 限额只针对这个发送者；真正的学生照样能登
+    assert "登录成功" in _reply(_send(client, OPENID, s["code"]))["Content"]
+    # 发对了不计次数：同一条消息微信重发也还是成功
+    assert "登录成功" in _reply(_send(client, OPENID, s["code"]))["Content"]
+
+
+def test_writes_for_a_deleted_account_are_refused(client, monkeypatch):
+    uid, token = _guest(client)
+    with sqlite3.connect(store.DB_PATH) as c:
+        c.row_factory = sqlite3.Row
+        tables = store._user_tables(c)
+        triggers = {r[0] for r in c.execute("SELECT name FROM sqlite_master WHERE type='trigger'")}
+    assert {f"trg_{t}_not_deleted" for t in tables} <= triggers  # 每张带 user_id 的表都有
+    assert client.delete("/api/me", headers=_h(token)).json()["ok"]
+    with pytest.raises(sqlite3.IntegrityError):
+        store.create_session(uid, 60)
+    # 删号那一刻已经过了登录校验和「用户存在」检查、还在路上的请求（比如在等模型回话的对话）：
+    # 写库被拒，回 410，数据不会被写回来。把两道检查替换成「已经通过」来模拟它。
+    monkeypatch.setattr(auth, "_session_uid", lambda request: uid)
+    monkeypatch.setattr(main, "_user_or_404", lambda u: {"id": u})
+    r = client.post("/api/edges", json={"uid": uid, "kind": "language", "text": "迟到的写入", "evidence_url": ""},
+                    headers=_h("qy_anything"))
+    assert r.status_code == 410
+    with sqlite3.connect(store.DB_PATH) as c:
+        assert c.execute("SELECT COUNT(*) FROM edges WHERE user_id=?", (uid,)).fetchone()[0] == 0
+    # 别人照常能写
+    other, to = _guest(client, "别人")
+    monkeypatch.setattr(auth, "_session_uid", lambda request: other)
+    r = client.post("/api/edges", json={"uid": other, "kind": "language", "text": "正常", "evidence_url": ""},
+                    headers=_h(to))
+    assert r.status_code == 200
+
+
+def test_qiyan_db_in_the_env_file_is_honoured(tmp_path):
+    target = tmp_path / "vol" / "from-env-file.db"
+    envf = tmp_path / ".env"
+    envf.write_text(f"# 注释\nQIYAN_DB={target}\n", encoding="utf-8")
+    env = {k: v for k, v in os.environ.items() if k != "QIYAN_DB"}
+    env["QIYAN_ENV_FILE"] = str(envf)
+    # 按 main 的 import 顺序（auth → store 在 llm 之前）
+    out = subprocess.run([sys.executable, "-c", "import main, store; print(store.DB_PATH)"], cwd=SERVER,
+                         env=env, capture_output=True, text=True, check=True)
+    assert out.stdout.strip().splitlines()[-1] == str(target)

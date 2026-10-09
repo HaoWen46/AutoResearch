@@ -645,7 +645,19 @@ function portraitTabs(active) {
 
 /* ---------- 账号：微信登录（公众号发数字）、访客、隐私说明 ---------- */
 
-function setSession(r) {
+/* 换人（退出、删号、登录过期、登进另一个账号）一律整页重载：S 里有几十个字段、对话视图里有进行中的流，
+   逐个清容易漏，上一个人没发的草稿就会出现在下一个人的表单里。要去哪一页、要提示什么，经 sessionStorage 带过去。 */
+function reloadInto(view, msg) {
+  try {
+    sessionStorage.setItem("rg_next_view", view || "home");
+    if (msg) sessionStorage.setItem("rg_toast", msg);
+  } catch (_) { /* 存不了就回首页、不提示 */ }
+  location.reload();
+}
+
+/* 记下会话。原来是另一个人（uid 变了）就返回 true，并且已经开始重载：调用方要立刻停手。 */
+function setSession(r, nextView, msg) {
+  const switching = !!S.uid && r.uid !== S.uid;
   S.uid = r.uid;
   if (r.token) S.token = r.token;
   S.nickname = r.nickname || S.nickname;
@@ -656,8 +668,10 @@ function setSession(r) {
     localStorage.setItem("rg_token", S.token);
     localStorage.setItem("rg_nick", S.nickname);
   } catch (_) { /* 存不了就只在这一页有效 */ }
+  if (switching) { reloadInto(nextView || "today", msg); return true; }
   const chip = document.getElementById("userNickname");
   if (chip) chip.textContent = S.guest ? `${S.nickname} · 访客` : S.nickname;
+  return false;
 }
 
 function clearSession() {
@@ -670,8 +684,7 @@ function clearSession() {
 
 function signedOut(msg) {
   clearSession();
-  if (msg) toast(msg);
-  setView("login");
+  reloadInto("login", msg);
 }
 
 /* 回到一个已有的账号：读它的画像状态，决定「对话」页落在哪一格 */
@@ -760,20 +773,26 @@ function consentRow() {
 
 let wxPoll = 0;  // 微信登录的轮询；离开登录页或换数字时停掉
 
+let wxAttempt = 0;  // 第几次微信登录尝试；旧尝试的响应回来时编号对不上就丢掉
+
 function stopWxPoll() {
   clearTimeout(wxPoll);
   wxPoll = 0;
+  wxAttempt += 1;  // 清掉定时器拦不住已经发出去的请求：靠编号让它回来时作废
 }
 
 /* 微信登录：网页拿一个 6 位数字，学生在公众号里发它，网页轮询到了就登进去 */
 async function startWechat(box, opts) {
   stopWxPoll();
+  const attempt = wxAttempt;
+  const live = () => attempt === wxAttempt && box.isConnected;
   box.innerHTML = "";
   box.hidden = false;
   let r;
   try {
     r = await api("POST", "/api/auth/wechat/start", { nickname: opts.nickname, consent: true });
-  } catch (e) { box.hidden = true; toast(e.message); return; }
+  } catch (e) { if (live()) { box.hidden = true; toast(e.message); } return; }
+  if (!live()) return;
   const name = r.account_name ? `「${esc(r.account_name)}」` : "启研";
   if (r.qr_url) {
     const qr = el("img", "wx-qr");
@@ -804,14 +823,15 @@ async function startWechat(box, opts) {
 
   const deadline = Date.now() + r.expires_in * 1000;
   const tick = async () => {
-    if (!box.isConnected) { stopWxPoll(); return; }  // 离开了登录页
+    if (!live()) return;  // 换了数字、走了访客、离开了登录页
     let res;
     try {
       res = await api("POST", "/api/auth/wechat/poll", { ticket: r.ticket });
     } catch (e) {
-      status.textContent = `${e.message}`;
+      if (live()) status.textContent = `${e.message}`;
       return;  // 过期或用过了：不再轮询，等学生点「换一个数字」
     }
+    if (!live()) return;  // 请求在路上时用户已经换了别的登录方式：这个结果不能再生效
     if (res.pending) {
       const left = Math.max(0, Math.round((deadline - Date.now()) / 1000));
       status.textContent = `等你在微信里发送…（还剩 ${Math.floor(left / 60)}:${String(left % 60).padStart(2, "0")}）`;
@@ -819,9 +839,8 @@ async function startWechat(box, opts) {
       return;
     }
     stopWxPoll();
-    setSession(res);
-    if (res.left_guest) toast("这个微信已经有账号，已登进去；刚才访客的记录留在访客号里");
-    else toast(res.bound ? "绑定好了，记录都在" : `你好，${res.nickname}`);
+    if (setSession(res, "today", "这个微信已经有账号，已登进去；刚才访客的记录留在访客号里")) return;
+    toast(res.bound ? "绑定好了，记录都在" : `你好，${res.nickname}`);
     if (res.bound) { setView("me"); return; }
     await afterLogin(res.created);
   };
@@ -868,8 +887,9 @@ function renderLogin() {
     const n = gname.value.trim();
     if (!n) { toast("先起个昵称吧"); gname.focus(); return; }
     gbtn.disabled = true;
+    stopWxPoll();  // 走访客就作废正在等的微信登录，免得它的结果回来盖掉访客会话
     try {
-      setSession(await api("POST", "/api/auth/login", { nickname: n, consent: true }));
+      if (setSession(await api("POST", "/api/auth/login", { nickname: n, consent: true }), "dialogue")) return;
       toast(`你好，${S.nickname}`);
       await afterLogin(true);
     } catch (e) { toast(e.message); gbtn.disabled = false; }
@@ -907,9 +927,10 @@ function renderLogin() {
 }
 
 async function logout() {
+  stopWxPoll();
   try { await api("POST", "/api/auth/logout"); } catch (_) { /* 会话已经没了也照样退 */ }
   clearSession();
-  setView("home");
+  reloadInto("home");
 }
 
 function accountPanel() {
@@ -943,8 +964,7 @@ function accountPanel() {
     try {
       await api("DELETE", "/api/me");
       clearSession();
-      toast("账号和记录都删了");
-      setView("home");
+      reloadInto("home", "账号和记录都删了");
     } catch (e) { toast(e.message); }
   });
   box.appendChild(acts);
@@ -4247,7 +4267,15 @@ document.getElementById("brandHome").addEventListener("click", () => setView("ho
       S.resume = "login";
     }
   }
-  setView("home");
+  let next = "home", note = "";
+  try {
+    next = sessionStorage.getItem("rg_next_view") || "home";
+    note = sessionStorage.getItem("rg_toast") || "";
+    sessionStorage.removeItem("rg_next_view");
+    sessionStorage.removeItem("rg_toast");
+  } catch (_) { /* 无痕模式等 */ }
+  setView(next === "login" && !S.uid ? "login" : next !== "home" && S.uid ? next : "home");
+  if (note) toast(note);
   if (needConsent) openPrivacy(true);
   // 开场最多停 0.7 秒：数据到了就走，不再固定等 1.4 秒
   const splash = document.getElementById("boot");

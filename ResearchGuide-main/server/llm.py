@@ -18,23 +18,14 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
+import envfile
 from limits import ReadLimitError, fetch, stream
 
 _ROOT = Path(__file__).resolve().parent.parent
 
 
 def _load_dotenv() -> None:
-    path = _ROOT / ".env"
-    if not path.exists():
-        return
-    for raw in path.read_text(encoding="utf-8").splitlines():
-        line = raw.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        key, val = line.split("=", 1)
-        key, val = key.strip(), val.strip().strip('"').strip("'")
-        if key and key not in os.environ:
-            os.environ[key] = val
+    envfile.load()  # 实际在 envfile 被 import 时已经读过；留着这个名字给老调用方
 
 
 _load_dotenv()

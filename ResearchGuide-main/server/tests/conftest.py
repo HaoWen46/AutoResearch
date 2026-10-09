@@ -3,6 +3,7 @@
 登录本身（会话、验证码、uid 核对、默认要登录）在 test_auth.py 里用真的 guard 测。"""
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 
@@ -14,10 +15,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 async def _trust_uid(request: Request) -> None:
     uid = request.query_params.get("uid") or request.path_params.get("uid")
-    if not uid and "json" in request.headers.get("content-type", ""):
+    if not uid:
         try:
-            body = await request.json()
-        except ValueError:
+            raw = await request.body()
+            body = json.loads(raw) if raw else None
+        except (RuntimeError, ValueError, UnicodeDecodeError):
             body = None
         if isinstance(body, dict):
             uid = body.get("uid")

@@ -89,12 +89,19 @@ async def guard(request: Request) -> None:
     if not uid:
         raise HTTPException(401, "请先登录", headers={"WWW-Authenticate": "Bearer"})
     request.state.uid = uid
-    claimed = [request.query_params.get("uid"), request.path_params.get("uid")]
-    # 只看有 JSON 体的接口：FastAPI 在跑依赖之前已经把它读进内存，这里再取是缓存，不会把上传流读一遍
-    if getattr(route, "body_field", None) is not None and "json" in request.headers.get("content-type", ""):
+    claimed = [*request.query_params.getlist("uid"), request.path_params.get("uid")]
+    # 有请求体的接口：不看 Content-Type，只要体是 JSON 对象就核对里面的 uid。
+    # FastAPI 对没有 Content-Type、application/JSON、application/xxx+json 都照样当 JSON 解析；
+    # 原来只认小写子串 "json"，把头写成 application/JSON 就能改别人的数据。
+    # 体在跑依赖之前已经被 FastAPI 读进内存，这里取的是缓存，不会把上传流再读一遍（上传接口没有 body_field）。
+    if getattr(route, "body_field", None) is not None:
         try:
-            body = await request.json()
-        except ValueError:
+            raw = await request.body()
+        except RuntimeError:  # 表单接口的流已被表单解析读走（目前没有这种接口）
+            raw = b""
+        try:
+            body = json.loads(raw) if raw else None
+        except (ValueError, UnicodeDecodeError):
             body = None  # 坏 JSON 交给接口自己报 422
         if isinstance(body, dict):
             claimed.append(body.get("uid"))
@@ -127,20 +134,38 @@ def _client_ip(request: Request) -> str | None:
         return None
 
 
+def _recent(key: str, now: float) -> list[float]:
+    """这个 key 一小时内的记录。调用方持有 _HITS_LOCK。"""
+    if len(_HITS) > 10000:  # 一小时内的才有用，旧的整体清掉
+        for k in [k for k, v in _HITS.items() if not v or now - v[-1] > 3600]:
+            del _HITS[k]
+    hits = [t for t in _HITS.get(key, []) if now - t < 3600]
+    _HITS[key] = hits
+    return hits
+
+
 def _allow(key: str, limit: int) -> bool:
-    """一小时内同一个 key 最多 limit 次。内存计数，有界。"""
+    """一小时内同一个 key 最多 limit 次：查一次、记一次。内存计数，有界。"""
     now = time.time()
     with _HITS_LOCK:
-        if len(_HITS) > 10000:  # 一小时内的才有用，旧的整体清掉
-            for k in [k for k, v in _HITS.items() if not v or now - v[-1] > 3600]:
-                del _HITS[k]
-        hits = [t for t in _HITS.get(key, []) if now - t < 3600]
+        hits = _recent(key, now)
         if len(hits) >= limit:
-            _HITS[key] = hits
             return False
         hits.append(now)
-        _HITS[key] = hits
     return True
+
+
+def _used_up(key: str, limit: int) -> bool:
+    """只查不记。"""
+    with _HITS_LOCK:
+        return len(_recent(key, time.time())) >= limit
+
+
+def _note(key: str) -> None:
+    """只记不查。"""
+    now = time.time()
+    with _HITS_LOCK:
+        _recent(key, now).append(now)
 
 
 def _ip_allows(request: Request, kind: str) -> bool:
@@ -293,10 +318,14 @@ def _on_message(msg: dict[str, str]) -> str | None:
     digits = re.sub(r"\D", "", unicodedata.normalize("NFKC", msg.get("Content", "")))
     if len(digits) != 6:
         return "要登录启研，把网页上显示的 6 位数字发过来就行。"
+    # 先查限额再去配：原来是配完才看限额，超限之后照样能一直猜，限额只换了一句提示。
+    # 只记发错的；发对了（包括微信超时重发同一条）不算次数。
+    key = f"openid:{openid}"
+    if _used_up(key, PER_OPENID_HOUR):
+        return "发错的次数太多了，过一会儿再试。"
     if store.wechat_claim_code(digits, openid):
         return "登录成功，回到网页就好，网页会自己跳转。"
-    if not _allow(f"openid:{openid}", PER_OPENID_HOUR):
-        return "发错的次数太多了，过一会儿再试。"
+    _note(key)
     return "没找到这个数字。请看网页上显示的 6 位数字，5 分钟内有效。"
 
 

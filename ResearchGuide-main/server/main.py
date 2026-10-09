@@ -10,6 +10,7 @@ import asyncio
 import hmac
 import json
 import os
+import sqlite3
 import sys
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
@@ -66,6 +67,15 @@ app = FastAPI(title="启研 · AI Research Mentor (W0 Demo)", version="0.1.0", d
               lifespan=_lifespan)
 store.init_db()
 app.include_router(auth.router)
+
+
+@app.exception_handler(sqlite3.IntegrityError)
+async def _integrity(_request: Request, exc: sqlite3.IntegrityError):
+    """删号那一刻还在跑的请求：写库被触发器拒绝 → 410，前端按「账号没了」处理。别的约束错误照旧是 500。"""
+    if store.USER_DELETED in str(exc):
+        return JSONResponse({"detail": "这个账号已经删除了"}, status_code=410)
+    print(json.dumps({"error": "integrity", "msg": str(exc)}, ensure_ascii=False))
+    return JSONResponse({"detail": "Internal Server Error"}, status_code=500)
 
 
 # ---------- 请求模型 ----------

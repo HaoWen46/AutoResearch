@@ -24,7 +24,7 @@ pytestmark = pytest.mark.real_auth
 
 
 @pytest.fixture(autouse=True)
-def fresh(tmp_path, monkeypatch):
+def fresh(tmp_path, monkeypatch, real_llm):
     monkeypatch.setattr(store, "DB_PATH", tmp_path / "budget.db")
     store.init_db()
     auth._HITS.clear()

@@ -326,7 +326,7 @@ def _on_message(msg: dict[str, str]) -> str | None:
     key = f"openid:{openid}"
     if _used_up(key, PER_OPENID_HOUR):
         return "发错的次数太多了，过一会儿再试。"
-    if store.wechat_claim_code(digits, openid):
+    if store.wechat_claim_code(digits, openid, msg.get("MsgId", "")):
         return "登录成功，回到网页就好，网页会自己跳转。"
     _note(key)
     return "没找到这个数字。请看网页上显示的 6 位数字，5 分钟内有效。"
@@ -347,6 +347,8 @@ async def wechat_message(request: Request, signature: str = "", timestamp: str =
     安全模式下 parse 会核对签了密文的 msg_signature 并解密；明文模式只核 URL 签名，消息体是不可信的（只给本机调试）。"""
     if not wechat.check_signature(signature, timestamp, nonce):
         raise HTTPException(403, "签名不对")
+    if not wechat.configured():  # 只设了 Token、没开安全模式：消息体没签名，不收
+        raise HTTPException(403, "公众号要用安全模式（设 WECHAT_AES_KEY）")
     body = await request.body()
     try:
         msg = wechat.parse(body, msg_signature=msg_signature, timestamp=timestamp, nonce=nonce)
@@ -366,7 +368,7 @@ def wechat_dev_send(req: DevSendReq):
     if not _dev():
         raise HTTPException(404, "Not Found")
     return {"reply": _on_message({"FromUserName": req.openid, "ToUserName": "dev", "MsgType": "text",
-                                  "Content": req.code})}
+                                  "Content": req.code, "MsgId": "dev-" + secrets.token_hex(8)})}
 
 
 @router.post("/api/auth/legacy")

@@ -289,6 +289,8 @@ _MIGRATIONS: list[tuple[str, str, str]] = [
     # 账号：微信 openid（只对我们的公众号有效的编号）、同意隐私说明的时间与版本；
     # claimed_at 为空的是「有账号之前」的老用户，可以凭 uid 认领一次
     ("users", "wechat_openid", "ALTER TABLE users ADD COLUMN wechat_openid TEXT"),
+    # 配上这次登录的那条微信消息（MsgId）：一条消息只能配一次，防重放
+    ("wechat_tickets", "msg_id", "ALTER TABLE wechat_tickets ADD COLUMN msg_id TEXT"),
     ("users", "consent_at", "ALTER TABLE users ADD COLUMN consent_at TEXT"),
     ("users", "consent_version", "ALTER TABLE users ADD COLUMN consent_version TEXT NOT NULL DEFAULT ''"),
     ("users", "claimed_at", "ALTER TABLE users ADD COLUMN claimed_at TEXT"),
@@ -456,11 +458,25 @@ def wechat_ticket_new(ticket: str, code: str, expires_at: float, guest_uid: str 
     return True
 
 
-def wechat_claim_code(code: str, openid: str) -> bool:
-    """公众号收到一个数字：配上还在等的那次登录请求。微信超时会重发同一条消息，所以重复配同一个 openid 也算成功。"""
+def wechat_claim_code(code: str, openid: str, msg_id: str) -> bool:
+    """公众号收到一个数字：配上还在等的那次登录请求。
+    微信超时会重发同一条消息（同一个 MsgId），重发算成功；但同一个 MsgId 不能再去配别的请求：
+    有人拿到一条签过名的旧消息原样重放，只要碰上一个同号的新请求就能把它登进那个微信，现在不行了。"""
+    if not msg_id:
+        return False
     with _LOCK, _conn() as c:
-        cur = c.execute("UPDATE wechat_tickets SET openid=? WHERE code=? AND expires_at>? AND used=0"
-                        " AND (openid IS NULL OR openid=?)", (openid, code, time.time(), openid))
+        row = c.execute("SELECT ticket_hash, openid, msg_id FROM wechat_tickets WHERE code=? AND expires_at>? AND used=0",
+                        (code, time.time())).fetchone()
+        if row is None:
+            return False
+        # 这条消息已经配过别的请求：是重放，不是重发
+        if c.execute("SELECT 1 FROM wechat_tickets WHERE msg_id=? AND ticket_hash<>?",
+                     (msg_id, row["ticket_hash"])).fetchone():
+            return False
+        if row["openid"] is not None:
+            return row["openid"] == openid and row["msg_id"] == msg_id  # 微信重发同一条：还是成功
+        cur = c.execute("UPDATE wechat_tickets SET openid=?, msg_id=? WHERE ticket_hash=? AND openid IS NULL",
+                        (openid, msg_id, row["ticket_hash"]))
     return cur.rowcount == 1
 
 

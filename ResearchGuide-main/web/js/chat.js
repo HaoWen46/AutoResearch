@@ -324,8 +324,8 @@ const ChatView = (() => {
       box.appendChild(el("p", "rc-head", "这一轮发生了什么"));
       groups.forEach((g) => {
         const row = el("div", "rc-group");
-        const head = el("p", "rc-label", g.label);
-        if (g.note) head.appendChild(el("span", "rc-count", g.note));
+        const head = el("p", "rc-label", esc(g.label));
+        if (g.note) head.appendChild(el("span", "rc-count", esc(g.note)));
         row.appendChild(head);
         const ul = el("ul", "rc-list");
         g.items.forEach((t) => ul.appendChild(el("li", "", esc(t))));
@@ -344,8 +344,8 @@ const ChatView = (() => {
       const facts = el("div", "ri-facts");
       const cell = (k, v) => {
         const c = el("div", "ri-cell");
-        c.appendChild(el("span", "ri-k", k));
-        c.appendChild(el("span", "ri-v", v));
+        c.appendChild(el("span", "ri-k", esc(k)));
+        c.appendChild(el("span", "ri-v", esc(v)));
         facts.appendChild(c);
       };
       cell("课程", `${imp.written} 门`);
@@ -358,12 +358,12 @@ const ChatView = (() => {
       if (un.length) {
         box.appendChild(el("p", "rc-warn",
           `${un.length} 门是字母等级/五级制，没有算进绩点（教务换算口径未定，不敢替你定）：`
-          + un.map((u) => `${u.course}（${u.grade}）`).join("、")));
+          + un.map((u) => `${esc(u.course)}（${esc(u.grade)}）`).join("、")));
       }
       const cur = s.in_progress || [];
       if (cur.length) {
         box.appendChild(el("p", "rc-note",
-          `${cur.length} 门还在修：` + cur.map((c) => c.course).join("、")));
+          `${cur.length} 门还在修：` + cur.map((c) => esc(c.course)).join("、")));
       }
       const d = imp.derived || [];
       if (d.length) {
@@ -567,7 +567,7 @@ const ChatView = (() => {
         derived: "成绩单推的", user_edit: "你改的",
       };
       meta.appendChild(el("span", `badge src-${f.source}`, srcCn[f.source] || esc(f.source)));
-      if (f.affects_label) meta.appendChild(el("span", "badge plain", `影响${f.affects_label}`));
+      if (f.affects_label) meta.appendChild(el("span", "badge plain", `影响${esc(f.affects_label)}`));
       if (f.valid_until) {
         meta.appendChild(el("span", "badge plain", `到 ${esc(String(f.valid_until).slice(0, 10))} 失效`));
       }

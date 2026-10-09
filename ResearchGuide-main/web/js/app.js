@@ -28,6 +28,57 @@ const S = {
   mapSort: "order",
 };
 
+/* ---------- 进 HTML 之前先消毒 ----------
+   页面里大约一百六十处把字符串当 HTML 塞进去（innerHTML、el() 的第三个参数）。里面有模型写的理由、
+   学生粘的成绩单课名、外面抓来的论文标题。Codex 用一个 <img onerror> 课名就让脚本跑起来了。
+   逐处 esc 是本分（下面也逐处补了），这里再兜一层：所有写 innerHTML 的地方都先在一个不会执行的
+   <template> 里解析，删掉脚本类元素、on* 事件属性、javascript: 之类的链接，再放进页面。
+   我们没有第三方前端库，所以直接接管 Element 的 innerHTML 写入是安全的。 */
+const HTML_BLOCK = new Set(["SCRIPT", "IFRAME", "FRAME", "OBJECT", "EMBED", "LINK", "META", "BASE", "STYLE", "FORM", "NOSCRIPT", "TEMPLATE"]);
+const URL_ATTRS = new Set(["href", "src", "xlink:href", "action", "formaction", "poster", "background", "srcset"]);
+const SAFE_URL = /^(?:https?:|mailto:|#|\/(?!\/)|\.{0,2}\/|data:image\/(?:png|jpe?g|gif|webp);)/i;
+const _htmlSetter = Object.getOwnPropertyDescriptor(Element.prototype, "innerHTML").set;
+
+function sanitizeInto(holder, html) {
+  const t = document.createElement("template");
+  _htmlSetter.call(t, String(html ?? ""));  // template 的内容是惰性的：脚本不跑、图片不加载
+  t.content.querySelectorAll("*").forEach((n) => {
+    if (HTML_BLOCK.has(n.tagName.toUpperCase())) { n.remove(); return; }
+    for (const a of [...n.attributes]) {
+      const name = a.name.toLowerCase();
+      const value = a.value.replace(/[\u0000- ]/g, "");
+      if (name.startsWith("on") || name === "srcdoc" || name === "formaction"
+        || (URL_ATTRS.has(name) && value && !SAFE_URL.test(value))) {
+        n.removeAttribute(a.name);
+      }
+    }
+  });
+  return t.content;
+}
+
+Object.defineProperty(Element.prototype, "innerHTML", {
+  configurable: true,
+  get: Object.getOwnPropertyDescriptor(Element.prototype, "innerHTML").get,
+  set(html) {
+    // template 本身、SVG 里的元素（模板按 HTML 解析会把 <path> 变成普通元素）走原生写法；页面里的 SVG 都是 createElementNS 画的
+    if (this instanceof HTMLTemplateElement || this.namespaceURI !== "http://www.w3.org/1999/xhtml") {
+      _htmlSetter.call(this, html);
+      return;
+    }
+    if (html === "" || html == null) { this.textContent = ""; return; }
+    this.replaceChildren(sanitizeInto(this, html));
+  },
+});
+Element.prototype.insertAdjacentHTML = function (where, html) {
+  const frag = sanitizeInto(this, html);  // 直接放消过毒的节点，不再序列化后重新解析
+  const at = String(where).toLowerCase();
+  if (at === "beforebegin") this.before(frag);
+  else if (at === "afterbegin") this.prepend(frag);
+  else if (at === "beforeend") this.append(frag);
+  else if (at === "afterend") this.after(frag);
+  else throw new SyntaxError(`insertAdjacentHTML: ${where}`);
+};
+
 const $app = document.getElementById("app");
 const $nav = document.getElementById("mainNav");
 const $header = document.getElementById("headerRight");
@@ -674,18 +725,33 @@ function setSession(r, nextView, msg) {
     localStorage.setItem("rg_token", S.token);
     localStorage.setItem("rg_nick", S.nickname);
   } catch (_) { /* 存不了就只在这一页有效 */ }
-  if (switching) { reloadInto(nextView || "today", msg); return true; }
+  if (switching) {
+    clearLocalDrafts(["rg_uid", "rg_token", "rg_nick"]);  // 上一个人的草稿不留给这个人
+    reloadInto(nextView || "today", msg);
+    return true;
+  }
   const chip = document.getElementById("userNickname");
   if (chip) chip.textContent = S.guest ? `${S.nickname} · 访客` : S.nickname;
   return false;
 }
 
+/* 这台浏览器里存的个人草稿（任务草稿、阅读卡草稿、教程进度）。退出、删号、换人时清掉：
+   公用电脑上，上一个人没交的阅读卡草稿原来会出现在下一个人的表单里。keep 是要留下的键（界面偏好、新登录的身份）。 */
+function clearLocalDrafts(keep) {
+  try {
+    const drop = [];
+    for (let i = 0; i < localStorage.length; i += 1) {
+      const k = localStorage.key(i);
+      if (k && k.startsWith("rg_") && k !== "rg_kit" && !(keep || []).includes(k)) drop.push(k);
+    }
+    drop.forEach((k) => localStorage.removeItem(k));
+  } catch (_) { /* 无痕模式等 */ }
+}
+
 function clearSession() {
   S.uid = ""; S.token = ""; S.wechat = false; S.guest = true;
   S.myDir = undefined; S.portraitId = "";
-  ["rg_uid", "rg_token", "rg_nick"].forEach((k) => {
-    try { localStorage.removeItem(k); } catch (_) { /* 无痕模式等 */ }
-  });
+  clearLocalDrafts();
 }
 
 function signedOut(msg) {
@@ -1038,7 +1104,7 @@ async function portraitBar() {
   const bar = el("div", "portrait-bar");
   (r.portraits || []).forEach((p) => {
     const chip = el("div", "portrait-chip" + (p.active ? " on" : ""));
-    const name = el("button", "portrait-name", p.name);
+    const name = el("button", "portrait-name", esc(p.name));
     name.type = "button";
     name.onclick = async () => {
       if (p.active) return;
@@ -2111,7 +2177,7 @@ async function renderCards() {
       const id = window.RG_DIR && RG_DIR.legacyDir[code];
       return (id && RG_DIR.displayName(id)) || (FIELD_TREES[code] && FIELD_TREES[code].name) || (c.direction && c.direction.name) || "";
     }).filter(Boolean);
-    recLine.appendChild(el("p", "", `这份画像更贴近${names.join("、")}。${cards[0].why_you || ""}`));
+    recLine.appendChild(el("p", "", `这份画像更贴近${names.map(esc).join("、")}。${esc(cards[0].why_you || "")}`));
     if (window.innerWidth < 920) {
       recLine.classList.add("clamp");
       recLine.onclick = () => recLine.classList.remove("clamp");
@@ -2321,7 +2387,7 @@ async function loadCourses(box, query) {
     const head = box.querySelector("h4");
     if (head) head.dataset.source = mark;
     if (!r.items || !r.items.length) {
-      box.appendChild(el("div", "course-status", `「${query}」没有对上的课。查的是本学期公开课快照，对不上就空着。`));
+      box.appendChild(el("div", "course-status", `「${esc(query)}」没有对上的课。查的是本学期公开课快照，对不上就空着。`));
       return;
     }
     r.items.forEach((it) => {
@@ -2380,7 +2446,7 @@ async function showTeacher(name) {
     }
     if (r.bio) sheet.appendChild(el("p", "sheet-intro", esc(r.bio)));
     else sheet.appendChild(el("p", "sheet-intro", "没有对上北京大学的公开学者简介，这里只列出本学期教的课。"));
-    sheet.appendChild(el("p", "sheet-label", `本学期课程 · ${r.term || ""}`));
+    sheet.appendChild(el("p", "sheet-label", `本学期课程 · ${esc(r.term || "")}`));
     (r.courses || []).forEach((c) => {
       sheet.appendChild(el("div", "course-item", `${esc(c.name || "")}<br><span class="meta">${esc([c.department, c.credits].filter(Boolean).join(" · "))}</span>`));
     });
@@ -2392,12 +2458,12 @@ async function showTeacher(name) {
 /* ---------- ⑤⑥ 工作台 ---------- */
 
 function readDraft(tid) {
-  try { return localStorage.getItem("rg_draft_" + tid) || ""; } catch (_) { return ""; }
+  try { return localStorage.getItem(`rg_draft_${S.uid}_${tid}`) || ""; } catch (_) { return ""; }
 }
 function writeDraft(tid, text) {
   try {
-    if (text) localStorage.setItem("rg_draft_" + tid, text);
-    else localStorage.removeItem("rg_draft_" + tid);
+    if (text) localStorage.setItem(`rg_draft_${S.uid}_${tid}`, text);
+    else localStorage.removeItem(`rg_draft_${S.uid}_${tid}`);
   } catch (_) { /* 存不了就算了，不影响提交 */ }
 }
 
@@ -2544,7 +2610,7 @@ function taskPanelDone(p, task, opts) {
   head.appendChild(el("span", "task-meta done", "已完成"));
   p.appendChild(head);
   if (task.deliverable) {
-    p.appendChild(el("p", "deliverable", "你交的是：" + task.deliverable));
+    p.appendChild(el("p", "deliverable", "你交的是：" + esc(task.deliverable)));
   }
   if (opts.note) {
     const note = opts.note();
@@ -3085,7 +3151,7 @@ async function renderCard() {
   if (stale(seq)) return;
   loading.remove();
   const prev = (cards.cards || []).find((c) => c.arxiv_id === aid);
-  const draftKey = `rg_card_${kitId}_${aid}`;
+  const draftKey = `rg_card_${S.uid}_${kitId}_${aid}`;  // 带上是谁的：同一台电脑换人不串
   let draft = null;
   try { draft = JSON.parse(localStorage.getItem(draftKey) || "null"); } catch (_) { /* 坏草稿就丢掉 */ }
   const state = draft || { fields: { ...((prev && prev.fields) || {}) }, dims: { ...((prev && prev.dims) || {}) }, log: (prev && prev.decision_log) || [] };
@@ -4238,6 +4304,14 @@ function factCard(f, editable = false, isNew = false) {
   }
   return card;
 }
+
+/* 同一个浏览器的另一个标签页退出或换了人：这一页手里的会话和画面都已经不对，跟着重载 */
+window.addEventListener("storage", (e) => {
+  if (e.key !== null && e.key !== "rg_token") return;
+  let now = "";
+  try { now = localStorage.getItem("rg_token") || ""; } catch (_) { return; }
+  if (now !== S.token) location.reload();
+});
 
 /* ---------- 导航 & 启动 ---------- */
 

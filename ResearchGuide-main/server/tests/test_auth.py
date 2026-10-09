@@ -52,8 +52,9 @@ def client():
 
 @pytest.fixture
 def wx(monkeypatch):
-    """开通了公众号：消息接口用 TOKEN 验签。"""
+    """开通了公众号：消息接口用 TOKEN 验签。明文模式要显式允许（只给本机调试）；安全模式见 wx_secure。"""
     monkeypatch.setenv("WECHAT_TOKEN", TOKEN)
+    monkeypatch.setenv("WECHAT_ALLOW_PLAINTEXT", "1")
     monkeypatch.setenv("WECHAT_ACCOUNT_ID", "gh_test")
     monkeypatch.setenv("WECHAT_ACCOUNT_NAME", "启研")
 
@@ -64,18 +65,23 @@ def _signed(ts: str | None = None, nonce: str = "n1", token: str = TOKEN) -> str
     return f"signature={sig}&timestamp={ts}&nonce={nonce}"
 
 
-def _xml(openid: str, content: str | None = None, event: str | None = None) -> bytes:
+_MSG_SEQ = iter(range(10 ** 9, 2 * 10 ** 9))
+
+
+def _xml(openid: str, content: str | None = None, event: str | None = None, msg_id: str | None = None) -> bytes:
+    """一条用户消息。每条默认一个新 MsgId；要模拟微信重发同一条，就传同一个 msg_id。"""
     head = (f"<xml><ToUserName><![CDATA[gh_test]]></ToUserName><FromUserName><![CDATA[{openid}]]></FromUserName>"
             "<CreateTime>1700000000</CreateTime>")
     if event:
         return (head + f"<MsgType><![CDATA[event]]></MsgType><Event><![CDATA[{event}]]></Event></xml>").encode()
+    mid = msg_id or str(next(_MSG_SEQ))
     return (head + f"<MsgType><![CDATA[text]]></MsgType><Content><![CDATA[{content}]]></Content>"
-            "<MsgId>1234567890</MsgId></xml>").encode()
+            f"<MsgId>{mid}</MsgId></xml>").encode()
 
 
-def _send(client, openid: str, content: str, query: str | None = None):
+def _send(client, openid: str, content: str, query: str | None = None, msg_id: str | None = None):
     """假装微信服务器把一条用户消息推给我们。"""
-    return client.post(f"/api/wechat?{query or _signed()}", content=_xml(openid, content),
+    return client.post(f"/api/wechat?{query or _signed()}", content=_xml(openid, content, msg_id=msg_id),
                        headers={"Content-Type": "text/xml"})
 
 
@@ -220,8 +226,8 @@ def test_ticket_is_single_use_and_expires(client, wx):
 
 def test_wechat_retries_are_idempotent_but_another_sender_cannot_take_over(client, wx):
     s = client.post("/api/auth/wechat/start", json={}).json()
-    assert "登录成功" in _reply(_send(client, OPENID, s["code"]))["Content"]
-    assert "登录成功" in _reply(_send(client, OPENID, s["code"]))["Content"]  # 微信超时重发同一条
+    assert "登录成功" in _reply(_send(client, OPENID, s["code"], msg_id="777"))["Content"]
+    assert "登录成功" in _reply(_send(client, OPENID, s["code"], msg_id="777"))["Content"]  # 微信超时重发同一条
     assert "没找到" in _reply(_send(client, "o_someone_else", s["code"]))["Content"]
     r = client.post("/api/auth/wechat/poll", json={"ticket": s["ticket"]}).json()
     assert store.user_by_openid(OPENID)["id"] == r["uid"]
@@ -266,7 +272,9 @@ def test_without_a_wechat_account_login_is_refused_and_dev_mode_can_simulate(cli
     assert "登录成功" in client.post("/api/auth/wechat/dev-send", json={"code": s["code"]}).json()["reply"]
     assert client.post("/api/auth/wechat/poll", json={"ticket": s["ticket"]}).json()["wechat"] is True
 
-    monkeypatch.setenv("WECHAT_TOKEN", TOKEN)  # 配了公众号，开发捷径自动关掉
+    monkeypatch.setenv("WECHAT_TOKEN", TOKEN)  # 配了公众号（安全模式），开发捷径自动关掉
+    monkeypatch.setenv("WECHAT_AES_KEY", AES_KEY)
+    monkeypatch.setenv("WECHAT_APP_ID", APP_ID)
     assert client.post("/api/auth/wechat/dev-send", json={"code": "123456"}).status_code == 404
 
 
@@ -539,9 +547,9 @@ def test_guessing_limit_blocks_even_a_correct_code(client, wx, monkeypatch):
     assert "太多" in _reply(_send(client, "o_guesser", s["code"]))["Content"]
     assert client.post("/api/auth/wechat/poll", json={"ticket": s["ticket"]}).json()["pending"] is True
     # 限额只针对这个发送者；真正的学生照样能登
-    assert "登录成功" in _reply(_send(client, OPENID, s["code"]))["Content"]
+    assert "登录成功" in _reply(_send(client, OPENID, s["code"], msg_id="555"))["Content"]
     # 发对了不计次数：同一条消息微信重发也还是成功
-    assert "登录成功" in _reply(_send(client, OPENID, s["code"]))["Content"]
+    assert "登录成功" in _reply(_send(client, OPENID, s["code"], msg_id="555"))["Content"]
 
 
 def test_writes_for_a_deleted_account_are_refused(client, monkeypatch):
@@ -597,3 +605,23 @@ def test_backup_cli_uses_qiyan_db_from_the_env_file(tmp_path):
     dest = Path(out.stdout.strip().splitlines()[-1])
     with sqlite3.connect(dest) as c:
         assert c.execute("SELECT x FROM t").fetchone()[0] == 42  # 备份的是 .env 指的那个库，不是默认的演示库
+
+
+def test_token_alone_is_not_enough_for_wechat_login(client, monkeypatch):
+    monkeypatch.setenv("WECHAT_TOKEN", TOKEN)  # 只设了 Token：明文模式，消息体能伪造
+    assert client.get("/api/health").json()["auth"]["wechat_login"] is False
+    assert client.post("/api/auth/wechat/start", json={}).status_code == 503
+    assert _send(client, OPENID, "123456").status_code == 403
+
+
+def test_a_replayed_message_cannot_claim_a_new_login(client, wx, monkeypatch):
+    seq = iter([42, 42])
+    monkeypatch.setattr(auth.secrets, "randbelow", lambda n: next(seq))
+    first = client.post("/api/auth/wechat/start", json={}).json()
+    assert "登录成功" in _reply(_send(client, "o_victim", first["code"], msg_id="9001"))["Content"]
+    assert client.post("/api/auth/wechat/poll", json={"ticket": first["ticket"]}).status_code == 200
+    # 攻击者拿到那条签过名的消息，开一个同号的新请求，然后原样重放
+    second = client.post("/api/auth/wechat/start", json={}).json()
+    assert second["code"] == first["code"]
+    assert "没找到" in _reply(_send(client, "o_victim", second["code"], msg_id="9001"))["Content"]
+    assert client.post("/api/auth/wechat/poll", json={"ticket": second["ticket"]}).json()["pending"] is True

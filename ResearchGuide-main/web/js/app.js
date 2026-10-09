@@ -2626,6 +2626,17 @@ function taskPanelDone(p, task, opts) {
     if (note) p.appendChild(note);
   }
   if (S.lastFeedback && S.lastFeedbackTaskId === task.id) renderFeedbackInto(p);
+  else {
+    // 这次会话里没有这条反馈（刷新过、或从别的任务切回来）：从服务器取最近一次提交的反馈。原来就看不到了（Codex 复现）
+    const slot = el("div");
+    p.appendChild(slot);
+    api("GET", `/api/tasks/${encodeURIComponent(task.id)}`).then((t) => {
+      if (!t || !t.feedback || !slot.isConnected) return;
+      S.lastFeedback = t.feedback;
+      S.lastFeedbackTaskId = task.id;
+      renderFeedbackInto(slot);
+    }).catch(() => { /* 取不到就不显示，不挡任务页 */ });
+  }
   if (opts.onDone) p.appendChild(opts.onDone());
 }
 
@@ -3255,7 +3266,8 @@ async function renderCard() {
     agent.appendChild(el("summary", "", `你的 Agent（可选）· 决策日志 ${state.log.length} 条`));
     agent.appendChild(el("p", "form-note", "下载简报放进你的 Agent（Claude Code / Codex 放项目目录；DeepSeek 等网页版就复制内容）。它只能挑错和提问，不能替你写「主张」「假设」「我会改什么」。它的每条建议在这里登记，并逐条决定采纳、修改还是拒绝——拒绝要写理由。"));
     const dl = el("a", "btn small secondary", "交给你的 Agent ↓ AGENTS.md");
-    dl.href = `/api/brief?kit=${kitId}&arxiv_id=${aid}`;
+    // 走接口地址：页面在 GitHub Pages 时，相对路径会去 Pages 上找，下载不到（Codex 复现）
+    dl.href = apiUrl(`/api/brief?kit=${encodeURIComponent(kitId)}&arxiv_id=${encodeURIComponent(aid)}`);
     agent.appendChild(dl);
     const table = el("div", "log-rows");
     const paintLog = () => {

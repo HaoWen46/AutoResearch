@@ -497,12 +497,17 @@ def validate_ops(uid: str, ops: list[dict[str, Any]], evidence_pool: list[str]) 
                 continue
 
         target = None
+        changed_key = False
         if op in ("replace", "retract", "support"):
             tid = str(raw.get("target_fact_id") or "").strip()
             target = facts_by_id.get(tid)
             if target is None:
                 rejected.append({**item, "reason": "target_fact_not_found"})
                 continue
+            if op == "replace" and str(target.key) != key:
+                # 「把 direction:ai 改成 direction:math」：原来会存成 direction:ai = 数学，显示改了、规划和选项目还按 AI（Codex 复现）。
+                # 键变了就不是改一条，是换一条：按 add 走，add 会把同一类的旧方向撤掉。
+                op, target, changed_key = "add", None, True
 
         value = str(raw.get("value") or "").strip()
         if op in ("add", "replace") and not value:
@@ -527,7 +532,7 @@ def validate_ops(uid: str, ops: list[dict[str, Any]], evidence_pool: list[str]) 
         elif valid_until and _parse_when(valid_until) is None:
             valid_until = None
 
-        notes: list[str] = []
+        notes: list[str] = ["replace_key_changed_as_add"] if changed_key else []
         # 引文只撑住一部分 → 说明值里有模型的推断成分。不丢，但降级成 inferred，
         # 免得「用户说的」和「模型推的」在画像里长得一样（这是 base:code 那次事故的根因）。
         if op in ("add", "replace") and ratio < _SUPPORT_OK:
@@ -630,8 +635,11 @@ def apply_ops(uid: str, accepted: list[dict], decision_id: str) -> tuple[list[di
                 continue
             old_value = target.value
             merged = list(target.evidence) + evidence
+            # 来源、可信度、affects 也换成这次验过的：原来只换值，部分推断的新值还挂着旧的 user_edit / 1.0（Codex 复现）
             store.update_fact(target.id, value=op["value"], status="confirmed",
-                              evidence=merged, valid_until=op["valid_until"])
+                              evidence=merged, valid_until=op["valid_until"],
+                              source=op["source"], confidence=op["confidence"],
+                              affects=op.get("affects") or target.affects or "")
             store.add_revision(uid, fact_id=target.id, operation="replace", old_value=old_value,
                                new_value=op["value"], evidence=evidence, decision_id=decision_id)
             changed.append({**(store.get_fact(target.id) or target).to_dict(),
@@ -997,8 +1005,24 @@ def sync_transcript_facts(uid: str) -> dict[str, Any]:
 
     desired = {d["key"]: d for d in
                transcript.derive_capabilities(store.list_enrollments(uid))}
-    existing = {f.key: f for f in active_facts(uid)
-                if str(f.key).startswith("transcript:")}
+    # 同一个 key 可能有几条（老库）：原来只看最后一条，其余的永远不撤，删了课「Python 90」还挂着（Codex 复现）。
+    # 每个 key 留一条（用户改过的优先），多出来的撤掉（用户改过的不动）。
+    groups: dict[str, list] = {}
+    for f in active_facts(uid):
+        if str(f.key).startswith("transcript:"):
+            groups.setdefault(str(f.key), []).append(f)
+    existing = {}
+    dup_removed: list[str] = []
+    for key, fs in groups.items():
+        fs.sort(key=lambda f: (f.source != "user_edit", str(f.created_at)))
+        existing[key] = fs[0]
+        for extra in fs[1:]:
+            if extra.source == "user_edit":
+                continue
+            store.retract_fact(extra.id)
+            store.add_revision(uid, fact_id=extra.id, operation="retract", old_value=extra.value,
+                               new_value=None, evidence=list(extra.evidence))
+            dup_removed.append(key)
 
     # 两种「用户已经表过态」的情况，sync 必须让路，否则就是系统在覆盖用户：
     #   1. 他改过这条 —— 来源变成 user_edit，他才是关于他自己的权威。
@@ -1054,7 +1078,7 @@ def sync_transcript_facts(uid: str) -> dict[str, Any]:
                            evidence=list(f.evidence))
         removed.append(key)
 
-    if added or updated or removed:
+    if added or updated or removed or dup_removed:
         store.bump_memory_version(uid)
     return {"added": added, "updated": updated, "removed": removed,
             "protected": sorted(protected), "keys": sorted(desired)}

@@ -398,6 +398,7 @@ def submit(uid: str, task: MicroTask, payload: str) -> Feedback:
     )
     store.add_fact(fact)
     fb["learned_facts"] = [fact.to_dict()]
+    store.save_feedback(submission_id, fb)
 
     if task.action_id:
         a = store.get_action(uid, task.action_id)

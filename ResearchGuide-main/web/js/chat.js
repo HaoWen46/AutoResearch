@@ -131,7 +131,7 @@ const ChatView = (() => {
   async function render($app) {
     const mySeq = ++seq;
     const bar = await portraitBar();
-    if (mySeq !== seq) return;
+    if (mySeq !== seq || S.view !== "dialogue") return;  // 等待期间切到了别的页：不能再往页面上写
 
     $app.innerHTML = "";
     $app.appendChild(dialogueHead(bar));
@@ -191,7 +191,7 @@ const ChatView = (() => {
     try {
       history = await api("GET", `/api/dialogue/history?uid=${encodeURIComponent(S.uid)}`);
     } catch (e) { toast(e.message); }
-    if (mySeq !== seq) return;
+    if (mySeq !== seq || S.view !== "dialogue") return;  // 等待期间切到了别的页：不能再往页面上写
     history.messages.forEach((m) => addBubble(m.role, m.text));
     if (history.pending_action) {
       renderAction(history.pending_action);
@@ -206,7 +206,7 @@ const ChatView = (() => {
       renderAction(history.last_action);
     }
     await refreshFacts();
-    if (mySeq !== seq) return;
+    if (mySeq !== seq || S.view !== "dialogue") return;  // 等待期间切到了别的页：不能再往页面上写
     if (!history.messages.length) {
       addBubble("assistant", "你好。你不用说得很完整——先告诉我你现在最想弄清楚的一件事，或者你手上的情况。");
     }
@@ -240,7 +240,7 @@ const ChatView = (() => {
             }
           },
         );
-        if (mySeq !== seq) return;
+        if (mySeq !== seq || S.view !== "dialogue") return;  // 等待期间切到了别的页：不能再往页面上写
 
         if (result) {
           history.conversation_id = result.conversation_id;

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 import secrets
 import sqlite3
@@ -291,6 +292,8 @@ _MIGRATIONS: list[tuple[str, str, str]] = [
     ("users", "wechat_openid", "ALTER TABLE users ADD COLUMN wechat_openid TEXT"),
     # 配上这次登录的那条微信消息（MsgId）：一条消息只能配一次，防重放
     ("wechat_tickets", "msg_id", "ALTER TABLE wechat_tickets ADD COLUMN msg_id TEXT"),
+    # 任务反馈记在提交上（原来只在响应里）
+    ("submissions", "feedback", "ALTER TABLE submissions ADD COLUMN feedback TEXT"),
     ("users", "consent_at", "ALTER TABLE users ADD COLUMN consent_at TEXT"),
     ("users", "consent_version", "ALTER TABLE users ADD COLUMN consent_version TEXT NOT NULL DEFAULT ''"),
     ("users", "claimed_at", "ALTER TABLE users ADD COLUMN claimed_at TEXT"),
@@ -298,6 +301,8 @@ _MIGRATIONS: list[tuple[str, str, str]] = [
 
 # 依赖补出来的列，必须在补列之后建
 _AFTER_MIGRATIONS = [
+    # 修老库：无穷大、负数、离谱的学分清零（读出来序列化会 500）
+    "UPDATE enrollments SET credits=0 WHERE NOT (credits BETWEEN 0 AND 50)",
     "CREATE UNIQUE INDEX IF NOT EXISTS idx_users_wechat ON users(wechat_openid) WHERE wechat_openid IS NOT NULL",
 ]
 
@@ -521,6 +526,7 @@ def _user_tables(c: sqlite3.Connection) -> list[str]:
 
 def export_user(uid: str) -> dict[str, Any]:
     with _conn() as c:
+        c.execute("BEGIN")  # 整个导出看同一个快照：原来逐表查，中途切画像会拼出两份画像的状态（Codex 复现）
         user = c.execute("SELECT id, nickname, wechat_openid, created_at, consent_at, consent_version, onboard_state"
                          " FROM users WHERE id=?", (uid,)).fetchone()
         out: dict[str, Any] = {"user": dict(user) if user else None}
@@ -596,11 +602,19 @@ _UNSET = object()
 
 
 def update_fact(fid: str, value: str | None = None, status: str | None = None,
-                valid_until: Any = _UNSET, evidence: list[dict[str, Any]] | None = None) -> UserFact | None:
+                valid_until: Any = _UNSET, evidence: list[dict[str, Any]] | None = None,
+                source: str | None = None, confidence: float | None = None,
+                affects: str | None = None) -> UserFact | None:
     """局部更新。valid_until 用哨兵区分「不改」和「清空」，因为 None 是合法值。"""
     f = get_fact(fid)
     if not f:
         return None
+    if source is not None:
+        f.source = source
+    if confidence is not None:
+        f.confidence = confidence
+    if affects is not None:
+        f.affects = affects
     if value is not None:
         f.value = value
     if status is not None:
@@ -612,9 +626,10 @@ def update_fact(fid: str, value: str | None = None, status: str | None = None,
     f.updated_at = now_iso()
     with _LOCK, _conn() as c:
         c.execute(
-            "UPDATE facts SET value=?, status=?, valid_until=?, evidence=?, updated_at=? WHERE id=?",
-            (f.value, f.status, f.valid_until,
-             json.dumps(f.evidence, ensure_ascii=False), f.updated_at, fid),
+            "UPDATE facts SET value=?, status=?, valid_until=?, evidence=?, source=?, confidence=?, affects=?,"
+            " updated_at=? WHERE id=?",
+            (f.value, f.status, f.valid_until, json.dumps(f.evidence, ensure_ascii=False),
+             f.source, f.confidence, f.affects or "", f.updated_at, fid),
         )
     return f
 
@@ -661,6 +676,19 @@ def list_tasks(uid: str) -> list[MicroTask]:
 
 
 # ---------- submissions & messages ----------
+
+def save_feedback(submission_id: str, feedback: dict[str, Any]) -> None:
+    """把反馈记在这次提交上：原来反馈只在响应里，刷新或换个任务再回来就没了（Codex 复现）。"""
+    with _LOCK, _conn() as c:
+        c.execute("UPDATE submissions SET feedback=? WHERE id=?", (json.dumps(feedback, ensure_ascii=False), submission_id))
+
+
+def latest_feedback(uid: str, task_id: str) -> dict[str, Any] | None:
+    with _conn() as c:
+        row = c.execute("SELECT feedback FROM submissions WHERE user_id=? AND task_id=? AND feedback IS NOT NULL"
+                        " ORDER BY created_at DESC, rowid DESC LIMIT 1", (uid, task_id)).fetchone()
+    return json.loads(row["feedback"]) if row else None
+
 
 def save_submission(task_id: str, uid: str, payload: str) -> str:
     sid = new_id()
@@ -859,6 +887,12 @@ def list_portraits(uid: str) -> list[dict[str, Any]]:
         return _portrait_public(rows)
 
 
+def active_portrait_id(uid: str) -> str:
+    with _conn() as c:
+        row = c.execute("SELECT id FROM portraits WHERE user_id=? AND active=1", (uid,)).fetchone()
+    return row["id"] if row else ""
+
+
 def open_new_portrait(uid: str) -> None:
     """把当前这份收进快照，清空现场，留下一份空的新画像。"""
     with _LOCK, _conn() as c:
@@ -994,10 +1028,12 @@ def card_history(uid: str, kit_id: str, arxiv_id: str) -> list[dict[str, Any]]:
 
 def latest_cards(uid: str, kit_id: str) -> list[dict[str, Any]]:
     """每篇论文只取最新一版。"""
+    # 每篇只取一行：老库里并发写出过同一最高版本的重复行，原来会全返回，矩阵把一篇论文数成三篇（Codex 复现）
     with _conn() as c:
         rows = c.execute(
-            "SELECT data FROM cards c WHERE user_id=? AND kit_id=? AND version = "
-            "(SELECT MAX(version) FROM cards c2 WHERE c2.user_id=c.user_id AND c2.kit_id=c.kit_id AND c2.arxiv_id=c.arxiv_id) "
+            "SELECT data FROM cards c WHERE user_id=? AND kit_id=? AND rowid = "
+            "(SELECT c2.rowid FROM cards c2 WHERE c2.user_id=c.user_id AND c2.kit_id=c.kit_id AND c2.arxiv_id=c.arxiv_id "
+            " ORDER BY c2.version DESC, c2.created_at DESC, c2.rowid DESC LIMIT 1) "
             "ORDER BY created_at, rowid", (uid, kit_id)).fetchall()
     return _card_rows(rows)
 
@@ -1346,6 +1382,18 @@ def list_decisions(uid: str, limit: int = 20) -> list[dict[str, Any]]:
 # ---------- 成绩单（enrollments）----------
 # 底稿层：一门课一条记录。能力结论由 server/transcript.py 从这里推，不在这里写。
 
+MAX_CREDITS = 50.0
+
+
+def clean_credits(v: Any) -> float:
+    """学分只收 0–50 的有限数。原来 1e309 会存成无穷大，之后读成绩单、导出账号都 500（Codex 复现）。"""
+    try:
+        x = float(v or 0)
+    except (TypeError, ValueError):
+        return 0.0
+    return x if math.isfinite(x) and 0 <= x <= MAX_CREDITS else 0.0
+
+
 def replace_enrollments(uid: str, items: list[dict[str, Any]]) -> int:
     """整表替换某个人的成绩单，返回写入条数。
 
@@ -1361,7 +1409,7 @@ def replace_enrollments(uid: str, items: list[dict[str, Any]]) -> int:
                 "INSERT INTO enrollments(id,user_id,course,grade,credits,term,kind,status,created_at,updated_at)"
                 " VALUES(?,?,?,?,?,?,?,?,?,?)",
                 (it.get("id") or new_id(), uid, str(it.get("course") or "")[:120],
-                 str(it.get("grade") or "")[:24], float(it.get("credits") or 0),
+                 str(it.get("grade") or "")[:24], clean_credits(it.get("credits")),
                  str(it.get("term") or "")[:40], str(it.get("kind") or "")[:40],
                  str(it.get("status") or "completed"), now, now),
             )
@@ -1384,7 +1432,7 @@ def replace_terms(uid: str, items: list[dict[str, Any]]) -> int:
                 "INSERT INTO enrollments(id,user_id,course,grade,credits,term,kind,status,created_at,updated_at)"
                 " VALUES(?,?,?,?,?,?,?,?,?,?)",
                 (it.get("id") or new_id(), uid, str(it.get("course") or "")[:120],
-                 str(it.get("grade") or "")[:24], float(it.get("credits") or 0),
+                 str(it.get("grade") or "")[:24], clean_credits(it.get("credits")),
                  str(it.get("term") or "")[:40], str(it.get("kind") or "")[:40],
                  str(it.get("status") or "completed"), now, now),
             )
@@ -1411,7 +1459,7 @@ def add_enrollments(uid: str, items: list[dict[str, Any]]) -> int:
                 "INSERT INTO enrollments(id,user_id,course,grade,credits,term,kind,status,created_at,updated_at)"
                 " VALUES(?,?,?,?,?,?,?,?,?,?)",
                 (it.get("id") or new_id(), uid, str(it.get("course") or "")[:120],
-                 str(it.get("grade") or "")[:24], float(it.get("credits") or 0),
+                 str(it.get("grade") or "")[:24], clean_credits(it.get("credits")),
                  str(it.get("term") or "")[:40], str(it.get("kind") or "")[:40],
                  str(it.get("status") or "completed"), now, now),
             )

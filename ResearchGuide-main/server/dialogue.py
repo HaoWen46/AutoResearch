@@ -734,7 +734,7 @@ def _transcript_turn(uid: str, cid: str, message: str) -> dict[str, Any]:
             clean.append({
                 "course": course[:120],
                 "grade": transcript.normalize_grade(it.get("grade")),
-                "credits": max(0.0, float(it.get("credits") or 0)),
+                "credits": store.clean_credits(it.get("credits")),
                 "term": str(it.get("term") or "")[:40],
                 "kind": str(it.get("kind") or "")[:40],
                 "status": (str(it.get("status") or "completed")

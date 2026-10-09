@@ -10,6 +10,7 @@ import asyncio
 import contextvars
 import hmac
 import json
+import math
 import os
 import sqlite3
 import sys
@@ -489,10 +490,16 @@ def transcript_commit(req: TranscriptCommitReq):
         course = str(it.get("course") or "").strip()
         if not course:
             continue
+        try:
+            credits = float(it.get("credits") or 0)
+        except (TypeError, ValueError):
+            credits = -1.0
+        if not math.isfinite(credits) or not 0 <= credits <= store.MAX_CREDITS:
+            raise HTTPException(400, f"「{course[:30]}」的学分不对（要 0–{store.MAX_CREDITS:g} 之间的数）")
         clean.append({
             "course": course[:120],
             "grade": transcript.normalize_grade(it.get("grade")),
-            "credits": max(0.0, float(it.get("credits") or 0)),
+            "credits": credits,
             "term": str(it.get("term") or "")[:40],
             "kind": str(it.get("kind") or "")[:40],
             "status": (str(it.get("status") or "completed")
@@ -622,7 +629,7 @@ def task_get(tid: str, request: Request):
     # 这个接口不带 uid，只能按登录的人核对归属；原来知道任务 id 就能读任何人的任务
     if not t or t.user_id != auth.me(request):
         raise HTTPException(404, "task not found")
-    return t.to_dict()
+    return {**t.to_dict(), "feedback": store.latest_feedback(t.user_id, t.id)}  # 刷新、换任务回来都能看到反馈
 
 
 @app.get("/api/tasks")
@@ -918,7 +925,7 @@ async def _read_capped(request: Request, limit: int, too_big: str | None = None)
             raise HTTPException(413, too_big)
 
 
-def _review_and_record(uid: str, p: dict, data: bytes) -> dict:
+def _review_and_record(uid: str, p: dict, data: bytes, portrait: str = "") -> dict:
     try:
         result = submission.review(data, p)
     except submission.SubmissionError as exc:
@@ -928,7 +935,9 @@ def _review_and_record(uid: str, p: dict, data: bytes) -> dict:
     try:
         with userlock.hold(uid):
             current = store.get_project(uid, p["id"])
-            if current is None:
+            # 项目 id 在各画像里可以重复（同一个项目在 A、B 里都挑过）：只看 id 会把 A 的评阅记进 B（Codex 复现）。
+            # 交的时候是哪个画像，就只记进那个画像；画像变了就不记。
+            if current is None or (portrait and store.active_portrait_id(uid) != portrait):
                 result["recorded"] = False
                 result["note"] = "评阅期间切换了画像或删了这个项目，这次评阅没有记进项目"
                 return result
@@ -959,7 +968,9 @@ async def project_submit(pid: str, uid: str, request: Request):
     try:
         # run_in_executor 不带上下文变量：不包一层，评阅里的模型调用就不知道算在谁头上（budget.py）
         ctx = contextvars.copy_context()
-        return await asyncio.get_running_loop().run_in_executor(_REVIEW_POOL, ctx.run, _review_and_record, uid, p, data)
+        portrait = await run_in_threadpool(store.active_portrait_id, uid)
+        return await asyncio.get_running_loop().run_in_executor(_REVIEW_POOL, ctx.run, _review_and_record, uid, p, data,
+                                                                portrait)
     finally:
         _review_pending -= 1
 

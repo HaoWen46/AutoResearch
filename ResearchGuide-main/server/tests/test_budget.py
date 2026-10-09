@@ -143,7 +143,7 @@ def test_project_review_runs_with_the_requesters_budget(client, monkeypatch):
     store.save_project(uid, "p1", {"name": "项目", "reviews": []})
     seen = {}
 
-    def fake_review(u, p, data):
+    def fake_review(u, p, data, portrait=""):
         seen["who"] = budget._WHO.get()
         return {"ok": True}
 

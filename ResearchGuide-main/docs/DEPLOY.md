@@ -49,3 +49,8 @@ python deploy_fc.py qiyan-test
 - 微信要求消息接口五秒内回复，超时会重发两次；处理是幂等的。冷启动太慢的话，学生会看到「该公众号暂时无法提供服务」，重发一次就行；在意的话给函数留一个预留实例。
 - 备份：每天跑一次 `python tools/backup_db.py --out <备份目录> --keep 7`。隐私说明承诺删号后备份最多留 7 天，`--keep` 改大要同步改 `web/js/app.js` 的 `PRIVACY_HTML` 和 `server/auth.py` 的 `PRIVACY_VERSION`。
 - 上线顺序：前端和接口一起发。旧前端不带令牌，新接口会一律回 401；老用户浏览器里只有 uid 的，新前端会自动认领一次（`/api/auth/legacy`）。
+- 只跑一个实例（再说一遍，因为下面几样都依赖它）：会话、微信登录的数字、每人一把的改动锁（userlock.py）、按来源限次、模型额度的内存部分，都在这一个进程和这一个库里。多实例时它们各管各的：登录来回失效、同一个人的改动又会互相覆盖。
+- 模型额度（budget.py）：每天北京时间，全站 `LLM_DAILY_TOTAL`（默认 2000 次）、绑微信的人 `LLM_DAILY_USER`（150）、访客 `LLM_DAILY_GUEST`（15）；没同意隐私说明的人和匿名接口一律不调。超了功能回退到规则版，不报错。全站上限就是每天花费的上限。
+- 线程：Starlette 工作线程 `QIYAN_THREADS`（128）；流式对话另有 `QIYAN_TURN_THREADS`（32），每一轮在里面跑完才放锁。
+- 上线前打开 `/api/health` 看两项：`auth.wechat_login` 是 true（安全模式配好了）、`db.ephemeral` 是 false（库在持久盘上）。
+

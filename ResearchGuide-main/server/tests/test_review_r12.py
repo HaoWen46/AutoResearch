@@ -283,3 +283,21 @@ def test_a_negated_interest_is_not_an_interest():
     """「我对机器学习没有兴趣」不能记成兴趣「机器学习」；「我不是不喜欢 AI」这种双重否定照样算（Codex 复现）。"""
     assert not memory._short_value_supported("interest:ml", "机器学习", "我对机器学习没有兴趣")
     assert memory._short_value_supported("interest:ai", "AI", "我不是不喜欢 AI，只是这次不想写模型")
+
+
+@pytest.mark.parametrize("text", [
+    "对机器学习" + " " * 20000 + "没有兴趣",
+    " " * 20000 + "x",
+    "本科" + " " * 20000 + "x",
+    "大 " * 10000,
+    "3到" * 10000,
+])
+def test_evidence_helpers_stay_linear_on_long_messages(text):
+    """一长串空格原来让年级正则每个位置都把后面的空格吃完再吐回来：两万个空格要二十秒，整轮对话卡住。"""
+    import time
+    t0 = time.perf_counter()
+    memory._grades_in(text)
+    memory._quantities(text)
+    memory._short_value_supported("interest:ml", "机器学习", text)
+    memory._short_value_supported("grade", "大二", text)
+    assert time.perf_counter() - t0 < 1.0

@@ -3189,18 +3189,20 @@ function readDraft(tid) {
   try {
     const key = `rg_draft_${S.uid}_${tid}`;
     const cur = localStorage.getItem(key);
-    if (cur !== null) return cur;
+    if (cur !== null) { localStorage.removeItem("rg_draft_" + tid); return cur; }  // 新键在就以它为准，旧键别留着日后冒出来
     // 升级前的草稿存在不带 uid 的键里：能打开这道任务的就是它的主人（任务 id 是这个人的），搬到新键、删掉旧键。
-    // 原来升级之后没交的草稿就看不见了（Codex 复现）
+    // 原来升级之后没交的草稿就看不见了（Codex 复现）。搬不过去（存储满了）也照样显示，旧键留着
     const old = localStorage.getItem("rg_draft_" + tid);
-    if (old) { localStorage.setItem(key, old); localStorage.removeItem("rg_draft_" + tid); }
+    if (old) {
+      try { localStorage.setItem(key, old); localStorage.removeItem("rg_draft_" + tid); } catch (_) { /* 存不了：下次再搬 */ }
+    }
     return old || "";
   } catch (_) { return ""; }
 }
 function writeDraft(tid, text) {
   try {
     if (text) localStorage.setItem(`rg_draft_${S.uid}_${tid}`, text);
-    else localStorage.removeItem(`rg_draft_${S.uid}_${tid}`);
+    else { localStorage.removeItem(`rg_draft_${S.uid}_${tid}`); localStorage.removeItem("rg_draft_" + tid); }  // 清空时旧键一起删
   } catch (_) { /* 存不了就算了，不影响提交 */ }
 }
 

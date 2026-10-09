@@ -66,7 +66,7 @@ def test_a_short_value_must_match_its_quote():
     """学生说「我大二」，模型拿这句当依据把年级写成「博士」：短值原来跳过支撑度检查，照样按 declared 存进去。"""
     uid = _uid()
     acc, rej = memory.validate_ops(uid, [{**GRADE, "value": "博士"}, {**GRADE, "key": "major", "value": "物理"}], ["我大二"])
-    assert acc == [] and [x["reason"] for x in rej] == ["short_value_not_in_evidence"] * 2
+    assert acc == [] and [x["reason"] for x in rej] == ["grade_not_in_evidence", "short_value_not_in_evidence"]
     acc, rej = memory.validate_ops(uid, [{**GRADE, "value": "本科二年级"}, GRADE], ["我大二"])
     assert rej == [] and [a["value"] for a in acc] == ["本科二年级", "大二"]  # 同一个年级换个说法照收
 

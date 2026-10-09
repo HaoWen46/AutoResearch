@@ -45,7 +45,7 @@ def _check(key, value, quote, pool=None):
 def test_grade_contradictions_are_rejected(value, quote):
     """「本科在读」写成「本科二年级」、「我不是大二」写成「大二」：原来都按自述存了（Codex 复现）。"""
     acc, rej = _check("grade", value, quote)
-    assert acc == [] and rej[0]["reason"] == "short_value_not_in_evidence"
+    assert acc == [] and rej[0]["reason"] in ("short_value_not_in_evidence", "grade_not_in_evidence")
 
 
 @pytest.mark.parametrize("value,quote", [
@@ -301,3 +301,36 @@ def test_evidence_helpers_stay_linear_on_long_messages(text):
     memory._short_value_supported("interest:ml", "机器学习", text)
     memory._short_value_supported("grade", "大二", text)
     assert time.perf_counter() - t0 < 1.0
+
+
+@pytest.mark.parametrize("key,value,quote,ok", [
+    ("grade", "本科二年级，GPA4.0", "我本科二年级", False),                     # 长值也查夹带
+    ("interest:nlp", "机器学习与自然语言处理", "我对机器学习与自然语言处理没有兴趣", False),  # 长值也查否定
+    ("grade", "大二", "我不是sophomore，是junior", False),
+    ("grade", "大三", "我不是sophomore，是junior", True),
+    ("grade", "大一", "I am not a first-year undergraduate, I am a second-year undergraduate.", False),
+    ("grade", "本科二年级", "I am not a first-year undergraduate, I am a second-year undergraduate.", True),
+    ("grade", "本科二年级", "我不是本科生，I am a second-year graduate student.", False),
+    ("grade", "本科二年级", "我本科二年，北大的", True),
+    ("grade", "sophomore", "我现在是大二", True),
+    ("grade", "phd", "我在读博士", True),
+    ("grade", "大二", "我大二，作业错了三题。", True),                         # 作业错了不是改口
+    ("grade", "大二", "我大二，代码写错了", True),
+    ("interest:ai", "人工智能", "我不是对人工智能没有兴趣，只是暂时没空", True),  # 双重否定
+    ("interest:ml", "ML", "我不喜欢MLOps，只喜欢ML算法", True),                 # MLOps 不是 ML
+])
+def test_memory_rules_round15(key, value, quote, ok):
+    """第十五轮 Codex 复现的：长值绕过年级和否定检查、英文年级的否定和阶段、「本科二年」、英文规范值、
+    「作业错了」当成改口、双重否定、缩写没有词界。"""
+    affects = "task_difficulty" if key == "grade" else "direction_choice"
+    acc, rej = memory.validate_ops(_uid(), [_op(key, value, quote, affects=affects)], [quote])
+    assert (len(acc) == 1) is ok, rej
+
+
+@pytest.mark.parametrize("value,quote,ok", [
+    ("每周2小时", "我每周只能投入½小时", False),     # ½ 不拆成 1 和 2
+    ("每周0.5小时", "我每周只能投入½小时", True),
+    ("这学期写了1篇论文", "我这学期选了1门课", False),  # 门和篇不是一回事
+])
+def test_quantities_round15(value, quote, ok):
+    assert memory._numbers_supported(value, quote) is ok

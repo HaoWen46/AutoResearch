@@ -1368,6 +1368,29 @@ def replace_enrollments(uid: str, items: list[dict[str, Any]]) -> int:
     return len(items)
 
 
+def replace_terms(uid: str, items: list[dict[str, Any]]) -> int:
+    """按学期替换：这次贴进来的几个学期以新为准，别的学期不动，返回写入条数。
+
+    成绩单仍是快照（同一学期重贴不会出现重复课程），但快照只覆盖它自己包含的学期。
+    原来一律整表替换：学生在对话里只贴了这学期两门课（还特意说「其他学期保持不变」），
+    以前导入的所有学期就被删光了（Codex 复现）。要删某门课，用逐条删除。
+    """
+    now = now_iso()
+    terms = {str(it.get("term") or "")[:40] for it in items}
+    with _LOCK, _conn() as c:
+        c.executemany("DELETE FROM enrollments WHERE user_id=? AND term=?", [(uid, t) for t in terms])
+        for it in items:
+            c.execute(
+                "INSERT INTO enrollments(id,user_id,course,grade,credits,term,kind,status,created_at,updated_at)"
+                " VALUES(?,?,?,?,?,?,?,?,?,?)",
+                (it.get("id") or new_id(), uid, str(it.get("course") or "")[:120],
+                 str(it.get("grade") or "")[:24], float(it.get("credits") or 0),
+                 str(it.get("term") or "")[:40], str(it.get("kind") or "")[:40],
+                 str(it.get("status") or "completed"), now, now),
+            )
+    return len(items)
+
+
 def add_enrollments(uid: str, items: list[dict[str, Any]]) -> int:
     """追加式写入。给「识别并追加」用：不删原有，只跳过完全重复的条目。"""
     now = now_iso()

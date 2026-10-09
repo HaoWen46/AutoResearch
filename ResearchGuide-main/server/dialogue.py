@@ -742,9 +742,9 @@ def _transcript_turn(uid: str, cid: str, message: str) -> dict[str, Any]:
                            else "completed"),
             })
         if clean:
-            # 成绩单是**整份替换**：他粘的是当前完整成绩单，
-            # append 会让重复粘贴产生重复课程。
-            written = store.replace_enrollments(uid, clean)
+            # 按学期替换：贴进来的学期以新为准（重复粘贴不会重复），没贴的学期不动。
+            # 原来整份替换：只贴这学期两门课，以前导入的所有学期都被删光。
+            written = store.replace_terms(uid, clean)
             store.add_event(uid, "transcript_imported", "",
                             {"count": written, "via": "dialogue"})
 

@@ -472,8 +472,9 @@ def transcript_commit(req: TranscriptCommitReq):
         })
     if not clean:
         raise HTTPException(400, "没有可写入的课程")
+    # 默认按学期替换（贴进来的学期以新为准，没贴的学期不动）；append 只追加不删
     n = (store.add_enrollments(req.uid, clean) if req.mode == "append"
-         else store.replace_enrollments(req.uid, clean))
+         else store.replace_terms(req.uid, clean))
     store.add_event(req.uid, "transcript_imported", "",
                     {"count": n, "mode": req.mode or "replace"})
     # 成绩单变了 → 重新推导能力结论。这一步是成绩单真正的用处：

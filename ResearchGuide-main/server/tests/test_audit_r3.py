@@ -132,3 +132,31 @@ def test_duplicate_card_rows_count_as_one_paper():
                         json.dumps({"arxiv_id": "2401.00001", "version": 2, "status": "pass", "i": i}), "pass", f"2026-10-0{i + 1}"))
     rows = store.latest_cards(uid, "k")
     assert len(rows) == 1 and rows[0]["i"] == 2  # 取最后写的那行
+
+
+
+def test_changing_a_multi_value_key_retires_the_old_value():
+    uid = _uid()
+    old = UserFact(user_id=uid, category="interest", key="goal:phd", value="读博", confidence=0.9,
+                   source="declared", evidence=[], status="confirmed", affects="direction_choice")
+    store.add_fact(old)
+    quote = "我不打算读博了，想直接工作"
+    op = {"op": "replace", "key": "goal:work", "value": "直接工作", "category": "interest", "source": "declared",
+          "evidence_quote": quote, "target_fact_id": old.id, "affects": "direction_choice"}
+    accepted, rejected = memory.validate_ops(uid, [op], [quote])
+    assert not rejected
+    memory.apply_ops(uid, accepted, "d1")
+    live = {f.key for f in memory.active_facts(uid)}
+    assert "goal:work" in live and "goal:phd" not in live  # 原来两个目标同时留着
+
+
+def test_task_feedback_survives_switching_portraits_back_and_forth():
+    c = TestClient(main.app)
+    uid = c.post("/api/auth/login", json={"nickname": "来回切"}).json()["uid"]
+    a = store.list_portraits(uid)[0]["id"]
+    t = c.post("/api/tasks/generate", json={"uid": uid, "direction": "ai", "level": 1}).json()
+    c.post(f"/api/tasks/{t['id']}/submit", json={"uid": uid, "payload": "我读完了，因为例子清楚所以懂了。"})
+    assert c.post("/api/portraits", json={"uid": uid}).status_code == 200
+    assert c.post("/api/portraits/activate", json={"uid": uid, "id": a}).status_code == 200
+    again = c.get(f"/api/tasks/{t['id']}?uid={uid}").json()
+    assert again["feedback"] and "score" in again["feedback"]

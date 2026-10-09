@@ -803,9 +803,10 @@ def _clear_live(c: sqlite3.Connection, uid: str) -> None:
 
 
 # 恢复快照时的列顺序；memory_version / degraded 是整数列，缺省补 0，其余补空串。
+_NULLABLE_COLS = {"feedback"}  # 切画像存取快照时，这些列缺了就是 NULL，不要补成空串
 _RESTORE_COLS: dict[str, tuple[str, ...]] = {
     "tasks": ("id", "user_id", "data"),
-    "submissions": ("id", "task_id", "user_id", "payload", "created_at"),
+    "submissions": ("id", "task_id", "user_id", "payload", "created_at", "feedback"),
     "projects": ("id", "user_id", "data", "status", "created_at", "updated_at"),
     "conversations": ("id", "user_id", "status", "topic_hint", "created_at", "updated_at"),
     "actions": ("id", "user_id", "conversation_id", "action", "title", "direction",
@@ -830,7 +831,7 @@ def _restore_rows(c: sqlite3.Connection, table: str, uid: str, items: Any) -> No
                 vals.append(uid)
                 continue
             v = item.get(col)
-            if v is None:
+            if v is None and col not in _NULLABLE_COLS:  # 老快照没有的可空列（如 feedback）保持 NULL
                 v = 0 if col in _NUMERIC_COLS else ""
             vals.append(v)
         c.execute(

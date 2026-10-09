@@ -498,6 +498,7 @@ def validate_ops(uid: str, ops: list[dict[str, Any]], evidence_pool: list[str]) 
 
         target = None
         changed_key = False
+        retire_id = None
         if op in ("replace", "retract", "support"):
             tid = str(raw.get("target_fact_id") or "").strip()
             target = facts_by_id.get(tid)
@@ -506,7 +507,9 @@ def validate_ops(uid: str, ops: list[dict[str, Any]], evidence_pool: list[str]) 
                 continue
             if op == "replace" and str(target.key) != key:
                 # 「把 direction:ai 改成 direction:math」：原来会存成 direction:ai = 数学，显示改了、规划和选项目还按 AI（Codex 复现）。
-                # 键变了就不是改一条，是换一条：按 add 走，add 会把同一类的旧方向撤掉。
+                # 键变了就不是改一条，是换一条：新值按 add 写，被替换的那条明确撤掉——
+                # 不能只靠 add 的同类覆盖：goal:phd → goal:work 这种可多值的键不会被覆盖，两个目标会同时留着。
+                retire_id = target.id
                 op, target, changed_key = "add", None, True
 
         value = str(raw.get("value") or "").strip()
@@ -561,6 +564,7 @@ def validate_ops(uid: str, ops: list[dict[str, Any]], evidence_pool: list[str]) 
             "support_ratio": round(ratio, 3),
             "evidence_quote": str(raw.get("evidence_quote") or "").strip()[:300],
             "target_fact_id": target.id if target else None,
+            "retire_fact_id": retire_id,
             "notes": notes,
         })
 
@@ -589,6 +593,19 @@ def _supersede_existing(uid: str, key: str, spec: KeySpec, keep: str | None,
     return changed
 
 
+def _retire(uid: str, fid: str | None, evidence: list[dict], decision_id: str, keep: str | None = None) -> list[dict]:
+    """改键的 replace：把被替换的那条撤掉（已经不在用的、或者正好就是要留下的那条，不动）。"""
+    if not fid or fid == keep:
+        return []
+    old = store.get_fact(fid)
+    if not old or old.status not in DECISION_STATUSES:
+        return []
+    store.update_fact(old.id, status="superseded")
+    store.add_revision(uid, fact_id=old.id, operation="retract", old_value=old.value,
+                       new_value=None, evidence=evidence, decision_id=decision_id)
+    return [{"id": old.id, "key": old.key, "status": "superseded", "value": old.value, "retracted": True}]
+
+
 def apply_ops(uid: str, accepted: list[dict], decision_id: str) -> tuple[list[dict], list[dict]]:
     """把校验通过的操作写库。返回 (added, changed)。每条都留 revision。
 
@@ -609,6 +626,7 @@ def apply_ops(uid: str, accepted: list[dict], decision_id: str) -> tuple[list[di
         if kind == "add":
             dup = next((f for f in live_by_key.get(op["key"], []) if f.value == op["value"]), None)
             if dup is not None:
+                changed += _retire(uid, op.get("retire_fact_id"), evidence, decision_id, keep=dup.id)
                 store.update_fact(dup.id, evidence=list(dup.evidence) + evidence)
                 store.add_revision(uid, fact_id=dup.id, operation="support", old_value=dup.value,
                                    new_value=dup.value, evidence=evidence, decision_id=decision_id)
@@ -628,6 +646,7 @@ def apply_ops(uid: str, accepted: list[dict], decision_id: str) -> tuple[list[di
                                new_value=fact.value, evidence=evidence, decision_id=decision_id)
             live_by_key.setdefault(op["key"], []).append(fact)
             added.append({**fact.to_dict(), "notes": op["notes"]})
+            changed += _retire(uid, op.get("retire_fact_id"), evidence, decision_id)
 
         elif kind == "replace":
             target = store.get_fact(op["target_fact_id"] or "")

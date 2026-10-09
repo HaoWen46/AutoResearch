@@ -26,6 +26,7 @@ import anyio
 import anyio.to_thread
 from fastapi import Depends, FastAPI, HTTPException, Request
 from starlette.concurrency import run_in_threadpool
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -100,7 +101,6 @@ async def _lifespan(_app: FastAPI):
     await anyio.to_thread.run_sync(_MODEL.drain)  # 还在跑的模型活（浏览器走了照样在写的那一轮）做完再退
 
 
-# 每个接口先过 auth.guard：公开的放行，其余要登录，且请求里的 uid 必须是登录的这个人
 app = FastAPI(title="启研 · AI Research Mentor (W0 Demo)", version="0.1.0", dependencies=[Depends(auth.guard)],
               lifespan=_lifespan)
 store.init_db()
@@ -137,6 +137,29 @@ async def _integrity(_request: Request, exc: sqlite3.IntegrityError):
         return JSONResponse({"detail": "这个账号已经删除了"}, status_code=410)
     print(json.dumps({"error": "integrity", "msg": str(exc)}, ensure_ascii=False))
     return JSONResponse({"detail": "Internal Server Error"}, status_code=500)
+
+
+@app.middleware("http")
+async def prefer_inline_browse(request: Request, call_next):
+    """页面和静态资源按网页打开，不要被当成附件下载。
+
+    真要下载的接口自己带了 filename=（作业 zip、README），那些不动。
+    函数计算默认域名有时会补一个光秃秃的 attachment，这里改回 inline。
+    """
+    resp = await call_next(request)
+    cd = (resp.headers.get("content-disposition") or "").lower()
+    if "filename=" in cd:
+        return resp
+    resp.headers["content-disposition"] = "inline"
+    return resp
+
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 
 # ---------- 请求模型 ----------
@@ -289,9 +312,6 @@ def _user_or_404(uid: str) -> dict:
     if not u:
         raise HTTPException(404, "user not found")
     return u
-
-
-# ---------- auth：登录、会话、删号与导出在 auth.py ----------
 
 
 # ---------- onboarding ----------
@@ -701,7 +721,6 @@ def task_generate(req: TaskGenerateReq):
 @app.get("/api/tasks/{tid}")
 def task_get(tid: str, request: Request):
     t = store.get_task(tid)
-    # 这个接口不带 uid，只能按登录的人核对归属；原来知道任务 id 就能读任何人的任务
     if not t or t.user_id != auth.me(request):
         raise HTTPException(404, "task not found")
     return {**t.to_dict(), "feedback": store.latest_feedback(t.user_id, t.id)}  # 刷新、换任务回来都能看到反馈
@@ -1345,7 +1364,11 @@ app.mount("/static", StaticFiles(directory=str(WEB_DIR)), name="static")
 
 @app.get("/")
 def index():
-    return FileResponse(str(WEB_DIR / "index.html"))
+    return FileResponse(
+        str(WEB_DIR / "index.html"),
+        media_type="text/html; charset=utf-8",
+        headers={"Content-Disposition": "inline"},
+    )
 
 
 if __name__ == "__main__":

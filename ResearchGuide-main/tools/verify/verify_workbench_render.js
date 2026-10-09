@@ -182,9 +182,9 @@ const DIALOGUE_TASK = {
   const txt = allText(box);
 
   console.log("=== ① 对话任务必须渲染出来（这是过去失败的那一种） ===");
-  check(byClass(box, "dialogue-tasks").length === 1, "任务区里有「对话给你的任务」这一块");
-  check(txt.includes("挑 KotobaAI"), "任务的标题渲染出来了");
-  check(txt.includes("对话给你的任务"), "分组标题在");
+  check(byClass(box, "dialogue-tasks").length === 1, "作业区里有「对话给你的作业」这一块");
+  check(txt.includes("挑 KotobaAI"), "作业的标题渲染出来了");
+  check(txt.includes("对话给你的作业"), "分组标题在");
   check(byClass(box, "task-panel").length === 1, "渲染成了一个任务面板");
 
   console.log("\n=== ② 三问齐全 ===");
@@ -217,7 +217,7 @@ const DIALOGUE_TASK = {
   await m2.renderWorkbench();
   const box2 = CFG.app;
   const txt2 = allText(box2);
-  check(txt2.includes("对话给你的任务"), "对话任务那一块还在");
+  check(txt2.includes("对话给你的作业"), "对话作业那一块还在");
   check(txt2.includes("挑 KotobaAI"), "对话任务的标题仍在");
   check(txt2.includes("人工智能"), "方向路径那一段也在");
   check(byClass(box2, "dialogue-tasks").length === 1, "对话任务独立成块（没有被树挤掉）");

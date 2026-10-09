@@ -6,30 +6,36 @@
 
 ---
 
-## [2026-10-10] [FIX] Codex 六轮复查、两百人压测和学生全流程走查：权限、预算、注入、并发写、可用性、数据正确性
+## [2026-10-10] [FIX] Codex 七轮复查、两百人压测、学生全流程走查，并入 main（五栏 + w64）：权限、预算、注入、并发写、可用性、数据正确性
 
 - 变更内容：Codex（gpt-6-astra）对 #16/#17 和全站做了四轮审查，逐条复现后修掉。权限：uid 核对不再看 Content-Type 大小写；微信只认安全模式、同一条消息不能配两次登录、猜数字先查限额。预算：模型调用按人/按全站每天封顶，访客、没同意隐私说明的、匿名接口不调（budget.py）。注入：前端所有 innerHTML 先消毒，几处模型/用户文本逐处转义。并发：同一个人的改动一件一件来（userlock.py，异步等锁、每人排队上限），流式对话在自己的线程里跑完再放锁；删号后在路上的请求写不回来（墓碑 + 触发器）；评阅记录按当时的画像。可用性：MCP 不卡事件循环，论文抓取有上限、没人等的就取消，/api/papers 要登录。数据：成绩单按学期替换、「不及格」保留、半学分照算、无穷大学分拒收并修老库；改方向换键而不是换标签；替换写入新来源和可信度；重复结论和重复卡都对账；任务反馈存库；导出在一个读事务里。前端：换人整页重载、草稿按人存、只在明确退出时清；对话页晚到的渲染不覆盖别的页。压测（模拟两百人同时用）：等模型的接口挪进自己的线程池（workpool.py），公用池留给普通读写，原来两百人等模型时连健康检查都要排五秒；浏览器走了，还在排队的那轮对话撤掉、马上放锁，排队有上限（满了回 503）；同一出口地址一小时 600 次登录（原来 30，一个机房开不了号），全体访客另有每天合计的模型额度；上游重试也扣额度；服务关闭时等在跑的那一轮写完。全流程走查：访客绑微信、这个微信却已有账号时先问，访客号的会话留在这台浏览器上可以切回去（原来直接切走，访客的记录再也进不去）；交成果的评阅按一次读出的项目和画像记，项目页带上它属于的画像；模型给的任务格式不对（「20分钟」）照样建出任务，建不出来行动也不记成已接受；对话生成中切走再回来，新页面接上那一轮；切画像后方向重新取。
+- 并入 main：保留五栏和 w64 首页；登录页用本分支的（公众号没开通时只给访客入口，要先勾隐私说明——没同意的人不调模型）；会话过期先重试一次再踢人（上游的多实例兜底）照留；论文原文 /api/papers 仍要登录（上游按路径放开了，没登录也能让服务器去 arXiv 取任意论文）。界面版本 w65。
 - 影响文档：docs/DEPLOY.md、docs/CHANGELOG.md、.env.example
 - 影响模块：server/auth.py、server/budget.py（新）、server/userlock.py（新）、server/workpool.py（新）、server/envfile.py（新）、server/wechat.py、server/store.py、server/main.py、server/llm.py、server/memory.py、server/reading.py、server/workbench.py、server/transcript.py、server/dialogue.py、server/singleflight.py、web/js/app.js、web/js/chat.js、tools/backup_db.py、tools/verify/verify_receipt_render.js、server/tests/
 - 决策来源：陈浩文（上线前让 Codex 按「真的会有人用」来挑错）
 - 登记人：陈浩文
 
-## [2026-10-10] [FIX] 多人同时用：流式对话有总时限和封顶、关思考；线程池 40 → 128；库在临时盘上会报出来
+## [2026-10-10] [UX] 粒子首页收进 PR15 视觉引擎
 
-- 变更内容：`llm.chat_stream`（对话页用的流式调用）原来直接 `urlopen`，没有总时限、没有 `max_tokens`、没对 DeepSeek 关思考——每个对话默认开着思考（贵、慢），一个一直吊着不结束的流能占住一个工作线程不放。现在走 `limits.stream`（和 `fetch` 一样：总时限 `LLM_TOTAL_SECONDS`、空闲时限、字节上限），带 `max_tokens=2000` 和 `thinking: disabled`。Starlette 工作线程池默认 40 个，同步接口和流式对话各占一个直到做完，四十个学生同时对话第四十一个人就排队：启动时调到 `QIYAN_THREADS`（默认 128）。`store.ephemeral()`：库在 `/tmp` 下、或在函数计算上没设 `QIYAN_DB`，`/api/health` 报 `db.ephemeral: true` 并在启动日志里警告——线上现在就是这样（10-08 的记录：SQLite 写 `/tmp`），实例回收会丢掉所有账号和记录。`/api/health` 另报 `threads`。
-- 没改的（要换部署才能解决）：函数计算多实例时每个实例各有一份库和一份内存状态（会话、微信登录的数字、限频、去重缓存），登录会在实例之间来回失效。要么单实例 + NAS，要么换一台常驻机器跑 Docker 镜像，见 docs/DEPLOY.md。
-- 影响文档：docs/CHANGELOG.md、.env.example
-- 影响模块：server/limits.py、server/llm.py、server/main.py、server/store.py、server/tests/test_concurrency.py（新）
-- 决策来源：陈浩文（多人同时用会出什么事的自查）
-- 登记人：陈浩文
+- 变更内容：粒子首页改成 PR15 的发光粒子、每屏一色、散开再聚形、左右对调、钉住文字淡入、跳过与步进提示；文案仍用当前五栏那一版（先聊聊 / 给一个方向 / 交一份小作业），登录后仍是今日/作业/项目/研读/定位。界面 w64。
+- 影响文档：docs/CHANGELOG.md、docs/DESIGN_SPEC.md
+- 影响模块：web/js/app.js、web/css/styles.css、web/index.html
+- 决策来源：邬程灿
+- 登记人：助手
 
-## [2026-10-09] [FEAT] 账号：微信登录（关注公众号发数字）、访客绑微信、删号与导出；库路径读 QIYAN_DB
+## [2026-10-10] [MERGE] 合入 #15 前端优化，修一点就登录过期
 
-- 变更内容：原来「登录」只是起个昵称，每次都开新号；uid 是唯一凭证，知道别人的 uid 就能读他的成绩单和对话；`users.token` 生成了但从没校验。现在：微信登录——网页给一个 6 位数字，学生关注公众号把数字发过去，网页轮询到了自己登进去，没注册过的微信自动注册。走个人订阅号的「服务器配置」收消息（网站扫码登录要企业认证和备案域名，个人拿不到），只存公众号给的 openid，不存手机号、不用密码。访客可以先用，之后在「记录」页绑微信，数据跟着走。会话三十天不用才过期，库里只存令牌哈希。所有接口默认要登录（公开的写在 `server/auth.py` 的 `PUBLIC`），请求里带的 uid 必须是本人；`GET /api/tasks/{tid}` 补上归属校验。「记录」页加账号块：隐私说明、导出全部数据、退出、删除账号（真删每张带 user_id 的表）。首次进入要同意隐私说明，说明改了会再问一次。有账号之前的老用户凭浏览器里的 uid 自动认领一次。`store.DB_PATH` 读 `QIYAN_DB`（Dockerfile 早就设了，代码没读，重建容器会丢光用户）。加 `tools/backup_db.py` 在线备份。界面版本跳到 w60：w35–w38 线上用过、PR #15 到了 w53，同号会让浏览器拿到旧缓存。
-- 影响文档：docs/DEPLOY.md、docs/CHANGELOG.md、.env.example
-- 影响模块：server/auth.py（新）、server/wechat.py（新）、server/store.py、server/main.py、web/js/app.js、web/js/chat.js、web/css/styles.css、web/index.html、tools/backup_db.py（新）、server/tests/test_auth.py（新）、server/tests/conftest.py（新）
-- 决策来源：陈浩文（真实用户上线前：要能找回自己的数据、别人读不到；登录用微信）
-- 登记人：陈浩文
+- 变更内容：把 PR #15 的今日闭环进度、NBA 服务端措辞、项目「来源」页、骨架占位、评阅通过率条、方向抽屉入门读物合进当前五栏。六站大地图介绍页与已定五栏首页冲突，界面仍用粒子+五栏。登录 401 先重试再核对 `/api/auth/me`，不再一点就踢回登录。函数单实例并发提到 32。界面 w63。
+- 影响模块：web/js/app.js、web/css/styles.css、web/index.html、tools/deploy/deploy_fc.py
+- 决策来源：邬程灿
+- 登记人：助手
+
+## [2026-10-10] [MERGE] 合入 PR #16 #17，修研读/定位 user not found
+
+- 变更内容：把 PR #16（会话令牌、访客登录、微信登录可选、删号导出、QIYAN_DB）和 PR #17（流式对话总时限/封顶、关思考、线程池 128、health 报 ephemeral）合进当前五栏 + 粒子首页。PR #15 的六站介绍页与已定 chrome 冲突，界面不收；今日卡片 / 项目来源本地已有。研读先加载公开工具包，阅读卡才带 uid；云上临时库回收导致 user not found / 401 时清会话并请重新进入，不再把工具包显示成「加载失败」。界面 w62。
+- 影响模块：server/auth.py、server/wechat.py、server/store.py、server/main.py、server/limits.py、server/llm.py、web/js/app.js、web/js/chat.js、web/index.html
+- 决策来源：邬程灿
+- 登记人：助手
 
 ## [2026-10-09] [OPS] 补容器与测试环境，对齐部署课
 

@@ -83,15 +83,16 @@ def _entries(xml_bytes: bytes) -> list[dict[str, Any]]:
         title = re.sub(r"\s+", " ", e.findtext("a:title", "", ATOM)).strip()
         if not raw_id or title == "Error":
             continue
+        clean_id = re.sub(r"v\d+$", "", raw_id)
         out.append({
-            "id": re.sub(r"v\d+$", "", raw_id),
+            "id": clean_id,
             "title": title,
             "summary": re.sub(r"\s+", " ", e.findtext("a:summary", "", ATOM)).strip(),
             "authors": [a.findtext("a:name", "", ATOM) for a in e.findall("a:author", ATOM)],
             "published": (e.findtext("a:published", "", ATOM) or "")[:10],
             "updated": (e.findtext("a:updated", "", ATOM) or "")[:10],
             "categories": [c.get("term") for c in e.findall("a:category", ATOM)],
-            "url": f"https://arxiv.org/abs/{re.sub(r'v\\d+$', '', raw_id)}",
+            "url": f"https://arxiv.org/abs/{clean_id}",
         })
     return out
 

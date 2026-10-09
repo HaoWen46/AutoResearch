@@ -1,6 +1,10 @@
 # 密钥。示例文件 .env.example 可以入库。
 .env
 .env.local
+ResearchGuide-main/tools/deploy/.deploy.env
+ResearchGuide-main/tools/deploy/*.tgz
+ResearchGuide-main/tools/deploy/*.zip
+ResearchGuide-main/tools/deploy/vendor_wheels/
 
 # 依赖与虚拟环境
 node_modules/
@@ -18,6 +22,11 @@ slides/icons/
 
 # 压缩包里带有本地 .env，不入库
 product.zip
+
+# 只在本机对照 PR 用的检出，不入库
+_pr15/
+_pr16/
+_pr17/
 
 # 编辑器与系统
 ~$*

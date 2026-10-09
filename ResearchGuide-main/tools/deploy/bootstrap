@@ -1,0 +1,45 @@
+#!/bin/bash
+set -euo pipefail
+cd "$(dirname "$0")"
+export PYTHONUNBUFFERED=1
+export QIYAN_DB="${QIYAN_DB:-/tmp/qiyan.db}"
+python3 -V
+python3 - <<'PY'
+import pathlib
+import sys
+import zipfile
+
+print("py", sys.version, flush=True)
+root = pathlib.Path("/tmp/pydeps")
+root.mkdir(parents=True, exist_ok=True)
+marker = root / ".ok"
+tag = f"cp{sys.version_info.major}{sys.version_info.minor}"
+if not marker.exists():
+    n = 0
+    wheels = list(pathlib.Path("vendor_wheels").glob("*.whl"))
+    if not wheels:
+        raise SystemExit("no vendor_wheels")
+    for w in wheels:
+        name = w.name
+        if (
+            "py3-none-any" in name
+            or "py2.py3-none-any" in name
+            or tag in name
+            or "-abi3-" in name  # cryptography 只发 abi3 轮子（cp39-abi3），不带 cp311 字样
+        ):
+            zipfile.ZipFile(w).extractall(root)
+            n += 1
+    print("wheels", n, "tag", tag, flush=True)
+    if n == 0:
+        raise SystemExit(f"no wheels for {tag}")
+    marker.write_text(str(n))
+sys.path.insert(0, str(root))
+import fastapi
+import pydantic
+import uvicorn
+import cryptography  # 公众号安全模式要它：缺了现在就报错，别等到第一个学生登录才发现
+
+print("deps ok", fastapi.__version__, pydantic.__version__, flush=True)
+PY
+export PYTHONPATH="/tmp/pydeps:${PWD}/server:${PYTHONPATH:-}"
+exec python3 -m uvicorn server.main:app --host 0.0.0.0 --port 9000 --log-level info

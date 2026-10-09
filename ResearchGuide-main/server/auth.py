@@ -86,7 +86,13 @@ async def guard(request: Request) -> None:
     """挂在整个 app 上的依赖。公开接口直接放行；其余的先认会话，再核对请求里自称的 uid。"""
     route = request.scope.get("route")
     budget.bind(None)  # 先当匿名：公开接口不许调模型
-    if getattr(route, "path", None) in PUBLIC:
+    path = request.url.path or ""
+    route_path = getattr(route, "path", None)
+    if path.startswith("/static") or route_path in PUBLIC or path in PUBLIC:
+        return
+    # 路由还没绑上时，公开知识仍按路径放行，避免工具包被过期会话拖成 401。
+    # 论文原文 /api/papers/ 不在这里：没登录也能让服务器去 arXiv 取任意论文，会占满限速的抓取队列和磁盘缓存
+    if path.startswith("/api/kits/"):
         return
     # 查会话是一次 SQLite 读：放线程池，别在事件循环上做。每个请求都经过这里，库在网络盘上时一次就是几毫秒，
     # 在循环上排队会拖慢所有人，包括正在流式输出的对话。

@@ -97,7 +97,7 @@ def test_build_stamp_matches_every_cache_buster():
 def test_every_local_asset_is_cache_busted():
     """本地 js/css 都要带 ?v=，否则改了不生效。"""
     html = (WEB / "index.html").read_text(encoding="utf-8")
-    for m in re.finditer(r'(?:src|href)="(/static/(?:js|css)/[^"]+)"', html):
+    for m in re.finditer(r'(?:src|href)="((?:/)?static/(?:js|css)/[^"]+)"', html):
         assert "?v=" in m.group(1), f"{m.group(1)} 没有缓存参数，改了不会生效"
 
 
@@ -137,7 +137,7 @@ def test_the_mark_done_button_is_gone():
     js = _strip_js_comments((WEB / "js" / "chat.js").read_text(encoding="utf-8"))
     assert "标记完成" not in js, "「标记完成」按钮又回来了"
     assert '"complete"' not in js, "前端又在直接发 complete 事件（应该走任务提交）"
-    assert "去任务区完成" in js, "少了「去任务区完成」这个入口"
+    assert "去作业区完成" in js, "少了「去作业区完成」这个入口"
 
 
 def test_memory_panel_renders_project_folders():
@@ -289,9 +289,42 @@ def test_new_class_names_all_have_rules():
     """
     css = (WEB / "css" / "styles.css").read_text(encoding="utf-8")
     for cls in ("two-col-chat", "chat-next", "chat-input", "ws-head-bar",
-                "ws-bar-main", "ws-bar-side", "ws-bar-label", "ws-lead"):
+                "ws-bar-main", "ws-bar-side", "ws-bar-label", "ws-lead",
+                "app-top", "dir-chip", "user-menu-btn", "user-menu",
+                "snap-inner", "land-skip", "land-steps", "land-hint",
+                "land-closing", "snap-no"):
         # 用 (?![\w-]) 而不是 \b：类名里允许 `-`，所以 `\b` 会把
         # `.chat-next-nonexistent` 也当成 `.chat-next` 存在——那样把规则改名
         # 测试照样绿。（这个弱点是我回滚验证时发现的。）
         assert re.search(rf"\.{re.escape(cls)}(?![\w-])", css), \
             f".{cls} 在 JS 里用了，样式表里却没有规则（空钩子）"
+
+
+def test_sidebar_is_five_rooms_and_user_owns_portrait():
+    """侧栏只留今日 / 作业 / 项目 / 研读 / 定位。
+    对话、方向、记录从栏目里拿掉，改到右上角用户和方向。"""
+    html = (WEB / "index.html").read_text(encoding="utf-8")
+    views = re.findall(r'data-view="([^"]+)"', html)
+    assert views == ["today", "workbench", "projects", "read", "position"], views
+    assert "作业" in html
+    assert 'id="dirChip"' in html
+    assert 'id="userMenuBtn"' in html
+    js = (WEB / "js" / "app.js").read_text(encoding="utf-8")
+    assert "function openUserMenu" in js
+    assert "function paintChrome" in js
+    assert "八个工作区" not in js
+    assert "先聊五个问题" not in js
+    assert "问答画像" not in js
+    assert "此刻最值得做的一件事" not in (WEB / "css" / "styles.css").read_text(encoding="utf-8")
+
+
+def test_read_does_not_blame_kit_when_user_is_gone():
+    """研读曾经把工具包和「按 uid 拉阅读卡」绑在一次请求里。
+    云函数 /tmp 库一丢，旧 uid 变成 user not found，整页写成「工具包加载失败」。"""
+    js = (WEB / "js" / "app.js").read_text(encoding="utf-8")
+    assert "function recoverUser" in js
+    assert "function signedOut" in js
+    assert "rg_token" in js
+    assert "Authorization" in js
+    # 工具包失败文案只在单独取 kit 失败时用，不能再和 cards 绑死
+    assert '工具包加载失败' in js

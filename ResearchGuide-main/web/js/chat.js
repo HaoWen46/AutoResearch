@@ -54,7 +54,7 @@ const ChatView = (() => {
     abort = new AbortController();
     let res;
     try {
-      res = await apiFetch("/api/dialogue/stream", {  // app.js 的 apiFetch：带会话、接口地址
+      res = await apiFetch("/api/dialogue/stream", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
@@ -121,11 +121,11 @@ const ChatView = (() => {
     main.appendChild(el("h2", "", "对话"));
     main.appendChild(portraitTabs("dialogue"));
     const side = el("div", "ws-bar-side");
-    side.appendChild(el("span", "ws-bar-label", "画像"));
+    side.appendChild(el("span", "ws-bar-label", "档案"));
     side.appendChild(bar);
     head.append(main, side);
     head.appendChild(el("p", "ws-lead",
-      "直接说话就行。它会先看你的近况，再决定这一步做什么，需要查资料时会去查。"));
+      "有什么想搞清楚的，直接说。年级、专业、卡在哪，都行。"));
     return head;
   }
 
@@ -410,7 +410,7 @@ const ChatView = (() => {
       if (!jf) return;
       const p = (jf.payload || {});
       const box = el("div", "finished-note");
-      box.appendChild(el("p", "fn-title", `你刚在任务区交了「${esc(jf.title || "")}」`));
+      box.appendChild(el("p", "fn-title", `你刚在作业区交了「${esc(jf.title || "")}」`));
       const bits = [];
       if (p.chars) bits.push(`写了 ${p.chars} 字`);
       if (typeof p.score === "number") bits.push(`按标准 ${p.score} 分`);
@@ -461,15 +461,15 @@ const ChatView = (() => {
             });
             renderAction(r.action);
             actions.appendChild(el("p", "action-hint",
-              "任务已建好：说清「做什么 / 交什么 / 怎样算做到」。去任务区完成，回来我按结果给下一步。"));
-            addBubble("assistant", "好。右边任务区里已经有这一步了——做完把它交掉，回来我们接着往下走。");
+              "作业已建好：说清「做什么 / 交什么 / 怎样算做到」。去作业区完成，回来我按结果给下一步。"));
+            addBubble("assistant", "好。左边作业区里已经有这一步了——做完把它交掉，回来我们接着往下走。");
             await refreshFacts();
           } catch (e) { toast(e.message); go.disabled = false; }
         };
         row.appendChild(go);
       } else if (a.status === "accepted" || a.status === "in_progress") {
         // 已接：不再提供「标记完成」，只提供「去做」。完成只能通过提交交付物。
-        const go = el("button", "btn small", "去任务区完成");
+        const go = el("button", "btn small", "去作业区完成");
         go.type = "button";
         go.onclick = () => {
           S.openTaskId = a.task_id || "";

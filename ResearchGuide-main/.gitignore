@@ -1,6 +1,14 @@
 # 本地密钥
 .env
 .env.local
+tools/deploy/.deploy.env
+tools/deploy/.gh-payload.json
+tools/deploy/*.tgz
+tools/deploy/*.zip
+tools/deploy/vendor_wheels/
+_pr16/
+_pr17/
+_pr15/
 __pycache__/
 *.pyc
 .venv/

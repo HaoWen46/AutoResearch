@@ -102,12 +102,6 @@ function errText(data, status) {
   return `请求失败 (${status})`;
 }
 
-/* 接口地址：同源部署时为空。页面放在 GitHub Pages、接口在别的域名时，index.html 里先设 window.QIYAN_API。 */
-const API_BASE = String(window.QIYAN_API || "").replace(/\/$/, "");
-function apiUrl(path) { return API_BASE + path; }
-
-/* 登录凭证是会话令牌，放在请求头里（页面和接口不同源，cookie 会被浏览器拦）。
-   所有请求都走 apiFetch；接口回 401 说明令牌失效了（退出、过期、删号），回到登录页。 */
 function authHeaders(extra) {
   const h = Object.assign({}, extra || {});
   if (S.token && !h.Authorization) h.Authorization = `Bearer ${S.token}`;  // 调用方指定了就用调用方的（吊销旧令牌时）
@@ -120,9 +114,45 @@ function revokeToken(token) {
   apiFetch("/api/auth/logout", { method: "POST", headers: { Authorization: `Bearer ${token}` } }).catch(() => {});
 }
 
+function lostUser(err) {
+  const m = String(err && err.message || err || "");
+  return /user not found|请先登录/i.test(m);
+}
+
+async function recoverUser(err) {
+  if (!lostUser(err)) return false;
+  if (S.token) {
+    try {
+      const me = await apiFetch("/api/auth/me");
+      if (me.ok) return false;
+    } catch (_) { return false; }
+  }
+  signedOut("云上找不到这个账号了。重新起个称呼就能继续。");
+  return true;
+}
+
+/* 函数多实例时，登录写在 A、下一请求落到 B，B 的临时库里没有这份会话，会回 401。
+   先重试一次；仍 401 再问 /api/auth/me。会话其实还在就不踢人，避免点一下就被踢回登录。 */
+let sessionKick = null;
+
+async function confirmSessionGone() {
+  try {
+    const me = await apiFetch("/api/auth/me");
+    if (me.ok) return;
+    signedOut("这台云上的会话对不上了。再起个称呼就能继续。");
+  } catch (_) { /* 网络抖一下不踢人 */ }
+}
+
 async function apiFetch(path, opt = {}) {
-  const res = await fetch(apiUrl(path), { ...opt, headers: authHeaders(opt.headers) });
-  if (res.status === 401 && S.token && !path.startsWith("/api/auth/")) signedOut("登录过期了，请重新登录");
+  const send = () => fetch(apiUrl(path), { ...opt, headers: authHeaders(opt.headers) });
+  let res = await send();
+  if (res.status !== 401 || !S.token || String(path).startsWith("/api/auth/")) return res;
+  res = await send();
+  if (res.status !== 401) return res;
+  if (!sessionKick) {
+    sessionKick = confirmSessionGone().finally(() => { sessionKick = null; });
+  }
+  await sessionKick;
   return res;
 }
 
@@ -133,7 +163,9 @@ async function api(method, path, body) {
   let data = null;
   try { data = await res.json(); } catch (_) { /* no body */ }
   if (!res.ok) {
-    const err = new Error(errText(data, res.status));
+    const msg = errText(data, res.status);
+    if (res.status === 404 && /user not found/i.test(msg)) await recoverUser(new Error(msg));
+    const err = new Error(msg);
     err.status = res.status;
     throw err;
   }
@@ -157,6 +189,12 @@ function toast(msg, ms = 2600) {
   const t = el("div", "toast", esc(msg));
   document.body.appendChild(t);
   setTimeout(() => t.remove(), ms);
+}
+function skeleton(rows = 2) {
+  const box = el("div", "ws-skeleton");
+  box.setAttribute("aria-hidden", "true");
+  for (let i = 0; i < rows; i++) box.appendChild(el("div", "sk-block"));
+  return box;
 }
 const CAT_CN = { background: "背景", interest: "兴趣", capability: "能力", preference: "偏好", experience: "经历" };
 const SRC_CN = { declared: "自述", inferred: "推断", behavior: "行为" };
@@ -187,6 +225,7 @@ function setView(name) {
   document.body.classList.toggle("app-mode", inApp);
   if (!home && stopField) { stopField(); stopField = null; }
   if (name !== "cards") document.getElementById("nodeSheet")?.remove();
+  closeUserMenu();
   document.querySelectorAll(".nav-btn").forEach((b) => {
     const on = b.dataset.workspace === WORKSPACE[name];
     b.classList.toggle("active", on);
@@ -195,6 +234,7 @@ function setView(name) {
   });
   $nav.hidden = !inApp;
   $header.hidden = !inApp;
+  paintChrome();
   render();
   window.scrollTo({ top: 0 });
 }
@@ -230,60 +270,60 @@ async function render() {
 
 const HOME_PAGES = [
   {
-    kicker: "启研 · AI RESEARCH MENTOR",
+    kicker: "启研",
     title: "先认识你，<br>再走下一步。",
-    lead: "面向本科一、二年级。它不是问答框，而是一条可以回头看的科研入门。",
-    hint: "向下滚动",
+    lead: "给北大本科一、二年级。先聊你现在卡在哪，再给一件二十分钟里能做完的事。",
   },
   {
     kicker: "01",
-    title: "问答画像",
-    lead: "几轮对话，勾出你现在的位置、基础和好奇。它只记你自己说的，不替你编一段人设。",
+    title: "先聊聊",
+    lead: "年级、已经会的、想试什么。说不清就说不知道。只记你亲口说的。",
     points: [
-      ["位置", "年级、专业，或者你现在停在哪一步。"],
-      ["基础", "已经会的，和明确还没碰过的。"],
-      ["好奇", "想试的问题。说不清也可以选「不知道」，它会如实记下。"],
+      ["你在哪", "几年级、哪个院，或者现在停在哪一步。"],
+      ["会什么", "已经上手的，和明确还没碰过的。"],
+      ["想试什么", "一个具体问题就够。没有也没关系。"],
     ],
   },
   {
     kicker: "02",
-    title: "方向推荐",
-    lead: "直接给出此刻值得试的方向。每条都要能对上你刚说过的话，不拿通用介绍来凑。",
+    title: "给一个方向",
+    lead: "按你刚说的，标出值得先试的方向。对不上你的话，就不给。",
     points: [
-      ["为什么是你", "理由引用你的原话，至少对上位置、基础或好奇中的一件。"],
-      ["真实课程", "从北大教务公开课里找。找不到就说找不到，不编课名和老师。"],
-      ["入门读物", "先给读得动的那一篇，用来上手，不是一份书单。"],
+      ["对得上你", "理由里能看见你的原话。"],
+      ["真有这门课", "从北大教务公开课里找。没有就空着。"],
+      ["先读一篇", "上手用的那一篇，不是一份书单。"],
     ],
   },
   {
     kicker: "03",
-    title: "小任务",
-    lead: "方向先不展开成阅读清单。它只给你一件二十分钟内能做完的事。",
+    title: "交一份小作业",
+    lead: "不展开成阅读清单。一次只给一件，二十分钟里能做完。",
     points: [
-      ["做完", "读一小节、跑一个小例子，或回答一个具体问题。"],
-      ["留下", "一段话、一张图或一个输出。结果要能被看见。"],
-      ["记下", "实际做了什么，写回你的画像。"],
+      ["做什么", "读一小节、跑一个小例子，或回答一个具体问题。"],
+      ["交什么", "一段话、一张图或一段输出，别人能看见。"],
+      ["记下", "实际做了什么，下次不用重说。"],
     ],
   },
   {
     kicker: "04",
-    title: "获取反馈",
-    lead: "按事先说好的标准逐条看你的提交。评价的是这件事做成了没有，不是你这个人。",
+    title: "对一下交上来的",
+    lead: "按事先说好的几条看这件事做成了没有。不评价你这个人。",
     points: [
-      ["对事", "只看这一次交上来的内容，不推测你的潜力。"],
-      ["标准", "做到哪条、缺哪条，分开写，并指出下一步改哪里。"],
-      ["证据", "没有结果，就明确说缺证据。"],
+      ["对事", "只看这一次交上来的。"],
+      ["做到哪条", "做到的、缺的分开写，并指出下一处改哪里。"],
+      ["没结果就说", "缺证据就写缺证据。"],
     ],
   },
   {
     kicker: "05",
-    title: "持续成长",
-    lead: "记住这次证据，再决定下一件最值得做的事。下一步仍然只是一件事，不是一份新计划。",
+    title: "下次还认得你",
+    lead: "你说过的还在。做完这一件，再给下一件。",
     points: [
-      ["认识", "你说过的位置、基础和好奇还在，不用每次从头介绍。"],
-      ["记住", "反馈写回画像，下一次先看这些证据再开口。"],
-      ["再下一步", "只给一件最值得做的事。做完，再进入下一轮。"],
+      ["不用重介绍", "年级、基础、好奇还在。"],
+      ["带着上次的结果", "反馈写回来，下次先看这些。"],
+      ["仍然是一件事", "不是一份新计划。"],
     ],
+    closing: "做完这一圈，下次还认得你。",
   },
 ];
 
@@ -300,36 +340,42 @@ function renderHome() {
     const sec = el("section", "snap");
     sec.dataset.index = String(i);
     const points = (page.points || [])
-      .map(([k, v]) => `<li><b>${k}</b><span>${v}</span></li>`).join("");
-    sec.innerHTML = `<p class="hero-kicker">${page.kicker}</p><h2>${page.title}</h2>`
+      .map(([k, v], j) => `<li style="--i:${j}"><b>${k}</b><span>${v}</span></li>`).join("");
+    sec.innerHTML = `<div class="snap-inner">`
+      + (i === 0 ? `<p class="hero-kicker">${page.kicker}</p>` : `<p class="snap-no">${page.kicker}</p>`)
+      + `<h2>${page.title}</h2>`
       + `<p class="land-lead">${page.lead}</p>`
       + (points ? `<ul class="land-points">${points}</ul>` : "")
-      + (page.hint ? `<p class="snap-hint">${page.hint}</p>` : "");
+      + (page.closing ? `<p class="land-closing">${page.closing}</p>` : "")
+      + `</div>`;
     if (i === HOME_PAGES.length - 1) {
       const btn = el("button", "btn land-cta", "立即开始体验");
       btn.type = "button";
       btn.onclick = beginExperience;
-      sec.appendChild(btn);
+      sec.querySelector(".snap-inner").appendChild(btn);
     }
     snap.appendChild(sec);
   });
-  const rail = el("div", "fella-index");
-  rail.appendChild(el("span", "fella-mark"));
-  HOME_PAGES.forEach((page, i) => {
-    const b = el("button", "fella-no" + (i === 0 ? " on" : ""), String(i).padStart(2, "0"));
-    b.type = "button";
-    b.setAttribute("aria-label", `第 ${i + 1} 屏`);
-    b.onclick = () => {
-      const sec = snap.querySelectorAll(".snap")[i];
-      snap.scrollTo({ top: sec ? sec.offsetTop : 0, behavior: "smooth" });
-    };
-    rail.appendChild(b);
-  });
-  const progress = el("div", "home-progress");
-  progress.appendChild(el("i"));
-  land.append(canvas, snap, rail, progress);
+  const hintEl = el("div", "land-hint");
+  hintEl.setAttribute("aria-hidden", "true");
+  hintEl.append(el("span", "", "滚动以继续"), el("i"));
+  const skip = el("button", "land-skip", "跳过，直接开始");
+  skip.type = "button";
+  skip.onclick = beginExperience;
+  land.append(canvas, buildSteps(), hintEl, skip, snap);
   $app.appendChild(land);
-  stopField = mountSketch(canvas, snap, rail, progress);
+  stopField = mountSketch(canvas, snap);
+}
+
+function buildSteps() {
+  const box = el("div", "land-steps");
+  box.setAttribute("aria-hidden", "true");
+  const cur = el("b", "", "00");
+  const track = el("i", "land-steps-track");
+  track.appendChild(el("i"));
+  const total = el("span", "", `/ ${String(HOME_PAGES.length - 1).padStart(2, "0")}`);
+  box.append(cur, track, total);
+  return box;
 }
 
 function beginExperience() {
@@ -401,32 +447,37 @@ function bubble(x0, y0, x1, y1, r, tx, dir) {
 }
 
 const SKETCHES = [
-  // 00 台阶通向一扇门：先认识你，再走下一步
+  // 00 台阶通向一扇门：先认识你，再走下一步（白门框不动，绿门板绕左铰链带透视向里推开；
+  //     门内地板两条透视线收向消失点，门开了才渐显——走进去的路）
   () => {
     const door = [[0.22, 0.12], [0.22, -0.46], ...arcPts(0.5, -0.46, 0.28, Math.PI, Math.PI * 2, 32), [0.78, 0.12]];
     const inner = [[0.3, 0.12], [0.3, -0.44], ...arcPts(0.5, -0.44, 0.2, Math.PI, Math.PI * 2, 28), [0.7, 0.12]];
     const stairs = [[-0.95, 0.74], [-0.62, 0.74], [-0.62, 0.53], [-0.3, 0.53], [-0.3, 0.32], [0.02, 0.32], [0.02, 0.12], [0.95, 0.12]];
+    const pathL = [[0.3, 0.12], [0.385, -0.05]];
+    const pathR = [[0.7, 0.12], [0.615, -0.05]];
     return [
       { pts: stairs },
       { pts: door },
-      { pts: inner, accent: true },
+      { pts: inner, accent: true, part: "door" },
       { pts: ring(-0.46, 0.38, 0.05, 20), accent: true },
+      { pts: pathL, accent: true, part: "path" },
+      { pts: pathR, accent: true, part: "path" },
     ];
   },
-  // 01 一问一答的两个气泡
+  // 01 一问一答的两个气泡（问号绕自己的底部轻微摆动）
   () => {
     const q = [...arcPts(-0.36, -0.5, 0.1, Math.PI * 1.05, Math.PI * 2.25, 28), [-0.36, -0.33], [-0.36, -0.28]];
     return [
       { pts: bubble(-0.92, -0.78, 0.18, -0.12, 0.12, -0.62, -1) },
-      { pts: q, accent: true },
-      { pts: ring(-0.36, -0.2, 0.018, 8), accent: true },
+      { pts: q, accent: true, part: "q" },
+      { pts: ring(-0.36, -0.2, 0.018, 8), accent: true, part: "q" },
       { pts: bubble(-0.18, 0.06, 0.92, 0.62, 0.12, 0.56, 1) },
       { pts: [[0.0, 0.22], [0.72, 0.22]] },
       { pts: [[0.0, 0.34], [0.6, 0.34]] },
       { pts: [[0.0, 0.46], [0.38, 0.46]] },
     ];
   },
-  // 02 罗盘：指针指向一个方向
+  // 02 罗盘：指针指向一个方向（指针绕盘心来回摆动）
   () => {
     const out = [{ pts: ring(0, 0.04, 0.74, 96) }];
     for (let k = 0; k < 8; k++) {
@@ -440,13 +491,13 @@ const SKETCHES = [
     const s = tip(a + Math.PI, 0.52);
     const l = tip(a - Math.PI / 2, 0.1);
     const rr = tip(a + Math.PI / 2, 0.1);
-    out.push({ pts: [l, n, rr], accent: true });
-    out.push({ pts: [l, s, rr] });
+    out.push({ pts: [l, n, rr], accent: true, part: "needle" });
+    out.push({ pts: [l, s, rr], part: "needle" });
     out.push({ pts: ring(0, 0.04, 0.035, 12) });
     out.push({ pts: [[-0.05, -0.8], [-0.05, -0.96], [0.05, -0.8], [0.05, -0.96]] });
     return out;
   },
-  // 03 秒表：二十分钟
+  // 03 秒表：二十分钟（指针转回 12 点方向）
   () => {
     const c = [0, 0.14];
     const out = [
@@ -460,24 +511,24 @@ const SKETCHES = [
       const r0 = k % 3 === 0 ? 0.5 : 0.56;
       out.push({ pts: [[c[0] + Math.cos(a) * r0, c[1] + Math.sin(a) * r0], [c[0] + Math.cos(a) * 0.62, c[1] + Math.sin(a) * 0.62]] });
     }
-    out.push({ pts: arcPts(c[0], c[1], 0.4, -Math.PI / 2, Math.PI / 6, 40), accent: true });
-    out.push({ pts: [c, [c[0] + Math.cos(Math.PI / 6) * 0.44, c[1] + Math.sin(Math.PI / 6) * 0.44]], accent: true });
+    out.push({ pts: arcPts(c[0], c[1], 0.4, -Math.PI / 2, Math.PI * 1.5 - 0.02, 120), accent: true, part: "arc" });
+    out.push({ pts: [c, [c[0] + Math.cos(Math.PI / 6) * 0.44, c[1] + Math.sin(Math.PI / 6) * 0.44]], accent: true, part: "hand" });
     out.push({ pts: ring(c[0], c[1], 0.03, 12) });
     return out;
   },
-  // 04 一页提交，逐条打勾
+  // 04 一页提交，逐条打勾（第三条的待办圈滚动时变成对勾、换成主题色）
   () => {
     const page = [[-0.58, -0.8], [0.2, -0.8], [0.44, -0.56], [0.44, 0.8], [-0.58, 0.8], [-0.58, -0.8]];
     const out = [{ pts: page }, { pts: [[0.2, -0.8], [0.2, -0.56], [0.44, -0.56]] }];
     [-0.3, 0.02, 0.34].forEach((y, i) => {
       if (i < 2) out.push({ pts: [[-0.42, y], [-0.35, y + 0.07], [-0.22, y - 0.08]], accent: true });
-      else out.push({ pts: ring(-0.33, y, 0.06, 20) });
+      else out.push({ pts: ring(-0.33, y, 0.06, 20), part: "todo" });
       out.push({ pts: [[-0.1, y], [0.28, y]] });
     });
     out.push({ pts: [[-0.42, 0.6], [0.1, 0.6]] });
     return out;
   },
-  // 05 一棵往右长的树，走过的路用主色
+  // 05 一棵往右长的树，走过的路用主色（R→A→A2→C2 四个节点依次点亮）
   () => {
     const R = [-0.82, 0.06];
     const A = [-0.3, -0.38];
@@ -490,13 +541,53 @@ const SKETCHES = [
     const C2 = [0.8, 0.1];
     const node = (p, r, accent) => ({ pts: ring(p[0], p[1], r, 24), accent });
     const edge = (a, b, accent) => ({ pts: curve([a[0] + 0.06, a[1]], [b[0] - 0.06, b[1]]), accent });
-    return [
+    const arr = [
       node(R, 0.06, true), edge(R, A, true), node(A, 0.055, true), edge(A, A2, true), node(A2, 0.055, true),
       edge(A2, C2, true), node(C2, 0.05, true),
       edge(A, A1), node(A1, 0.05), edge(A2, C1), node(C1, 0.05),
       edge(R, B), node(B, 0.055), edge(B, B1), node(B1, 0.05), edge(B, B2), node(B2, 0.05),
     ];
+    arr[0].part = "n0"; arr[2].part = "n1"; arr[4].part = "n2"; arr[6].part = "n3";
+    return arr;
   },
+];
+
+/* 每屏主题色（参考彩色 WebGL 粒子站）：强调笔画、图形后柔光、背景微染、文字点缀共用，
+   随滚动相位在相邻两色间连续过渡 */
+const TONES = [
+  [127, 209, 194], // 00 起点 · 青
+  [143, 189, 246], // 01 画像 · 蓝
+  [195, 174, 245], // 02 方向 · 紫
+  [242, 205, 126], // 03 任务 · 金
+  [242, 160, 138], // 04 反馈 · 珊瑚
+  [164, 222, 138], // 05 成长 · 绿
+];
+
+/* 每图的聚形后动画：聚形完成、文字出完，随本屏向下滚动推进（act 0→1，scrub 可逆）。
+   persp = 门板绕竖轴向里推的透视旋转；sweep = 弧线随指针扫过逐渐显出；fill = 点亮时填实心 */
+const FIG_ANIMS = [
+  // 00 绿门板绕自身左铰链向里推开 78°：远端向铰链收拢、向门高中线收缩（白门框不动）；
+  //    门内地板两条透视线（收向消失点）随开门渐显——走进去的路
+  { parts: {
+    door: { persp: { hinge: [0.3, 0.12], w: 0.4, yc: -0.26, pf: 1.4, ang: (act) => 1.36 * (1 - Math.pow(1 - act, 3)) } },
+    path: { reveal: (act) => 1 - Math.pow(1 - act, 2) },
+  } },
+  { parts: { q: { pivot: [-0.36, -0.28], ang: (act, tm) => Math.sin(tm * 2.2) * 0.14 * (0.15 + 0.85 * act) } } },
+  // 02 指北针：以正北为中心，在相邻的两个刻度（东北—西北）之间来回摆
+  { parts: { needle: { pivot: [0, 0.04], ang: (act, tm) => -Math.PI / 4 + (Math.PI / 4) * (0.15 + 0.85 * act) * Math.sin(tm * 1.6) } } },
+  // 03 时针顺时针转 240° 回到 12 点；金色进度弧从 12 点起随时针扫过的位置延长
+  { parts: {
+    hand: { pivot: [0, 0.14], ang: (act) => 4.19 * (1 - Math.pow(1 - act, 3)) },
+    arc: { pivot: [0, 0.14], sweep: { from: -Math.PI / 2, base: 2.09, span: 4.19 } },
+  } },
+  { parts: { todo: { morphTo: [[-0.42, 0.34], [-0.35, 0.41], [-0.22, 0.26]] } } },
+  // 05 四个节点依次点亮：环内填成实心并发光
+  { parts: {
+    n0: { light: 0, fill: [-0.82, 0.06, 0.06] },
+    n1: { light: 1, fill: [-0.3, -0.38, 0.055] },
+    n2: { light: 2, fill: [0.24, -0.12, 0.055] },
+    n3: { light: 3, fill: [0.8, 0.1, 0.05] },
+  } },
 ];
 
 function strokeLength(pts) {
@@ -506,11 +597,12 @@ function strokeLength(pts) {
 }
 
 function sampleSketch(strokes, n) {
-  // 沿全部笔画等距取 n 个点；返回 {xy, acc}，顺序即笔画顺序
+  // 沿全部笔画等距取 n 个点；返回 {xy, acc, sid}，顺序即笔画顺序；sid 记粒子属于哪一笔（供图形动画分组）
   const lens = strokes.map((s) => strokeLength(s.pts));
   const total = lens.reduce((a, b) => a + b, 0) || 1;
   const xy = new Float32Array(n * 2);
   const acc = new Uint8Array(n);
+  const sid = new Uint16Array(n);
   let k = 0;
   strokes.forEach((s, si) => {
     const want = si === strokes.length - 1 ? n - k : Math.max(2, Math.round((lens[si] / total) * n));
@@ -530,42 +622,95 @@ function sampleSketch(strokes, n) {
       xy[k * 2] = a[0] + (b[0] - a[0]) * t;
       xy[k * 2 + 1] = a[1] + (b[1] - a[1]) * t;
       acc[k] = s.accent ? 1 : 0;
+      sid[k] = si;
       k += 1;
     }
   });
-  return { xy, acc, length: total };
+  return { xy, acc, sid, length: total };
 }
 
-function scrollTarget(scroller) {
-  // 每屏前 40% 停住不动（读字），40%–85% 之间换图，之后停在新图上
-  const secs = [...scroller.querySelectorAll(".snap")];
-  const st = scroller.scrollTop;
-  let a = 0;
-  while (a < secs.length - 2 && st >= secs[a + 1].offsetTop) a += 1;
-  const span = Math.max(1, secs[a + 1].offsetTop - secs[a].offsetTop);
-  const raw = (st - secs[a].offsetTop) / span;
-  const t = Math.min(1, Math.max(0, (raw - 0.4) / 0.45));
-  return Math.min(secs.length - 1, a + t);
-}
-
-function mountSketch(canvas, scroller, rail, progress) {
+function mountSketch(canvas, scroller) {
   const ctx = canvas.getContext("2d");
   if (!ctx) return () => {};
   const still = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
-  const nos = [...rail.querySelectorAll(".fella-no")];
-  const mark = rail.querySelector(".fella-mark");
-  const bar = progress.querySelector("i");
-  const INK = "rgb(237, 241, 238)";
-  const ACCENT = "rgb(127, 209, 194)";
-  let W = 0; let H = 0; let cx = 0; let cy = 0; let size = 0; let dot = 1.35;
+  let W = 0; let H = 0; let size = 0; let dot = 1.15;
+  let gy = 0;    // 图形锚点 y（恒为内容带中心）
+  let gxA = [];  // 各屏图形锚点 x（与文字逐屏左右对调；转场时随相位插值横移）
   let figs = [];
   let N = 0;
-  let shown = [];
+  let scatter = []; // 换图途中粒子均匀散布的全屏目标位（也是开场出发点）
+  let dust = [];    // 漂浮星尘：随主题色的氛围层，缓慢漂移明灭
+  let plex = [];    // 星座网：漂移节点 + 近邻连线，背景的图案结构层
+  let lastActive = -1; // 上次写进 CSS 的主题色屏号
+  const stepsBox = canvas.parentElement ? canvas.parentElement.querySelector(".land-steps") : null;
+  const stepCur = stepsBox ? stepsBox.querySelector("b") : null;
+  const stepFill = stepsBox ? stepsBox.querySelector(".land-steps-track i") : null;
+
+  /* 发光粒子 sprite：热芯型径向渐变（核心占 45%、外围快速衰减）画一次，逐点 drawImage；
+     粒子层用加法混合，交叠处亮度叠加出「燃烧」感，而不是靠大光晕 */
+  const glowSprite = (rgb) => {
+    const c = document.createElement("canvas");
+    c.width = 32; c.height = 32;
+    const g = c.getContext("2d");
+    const grad = g.createRadialGradient(16, 16, 0, 16, 16, 16);
+    grad.addColorStop(0, `rgba(${rgb},1)`);
+    grad.addColorStop(0.45, `rgba(${rgb},0.85)`);
+    grad.addColorStop(1, `rgba(${rgb},0)`);
+    g.fillStyle = grad;
+    g.fillRect(0, 0, 32, 32);
+    return c;
+  };
+  const SPR_INK = glowSprite("237,241,238");
+  const SPRS = TONES.map((t) => glowSprite(t.join(","))); // 每屏一色的强调笔画 sprite
+  /* 胶片颗粒：一张静态噪点瓦片（中灰上下抖动，overlay 才能双向），低透明度铺满全屏 */
+  const grainTile = document.createElement("canvas");
+  grainTile.width = grainTile.height = 160;
+  {
+    const g = grainTile.getContext("2d");
+    const id = g.createImageData(160, 160);
+    for (let i = 0; i < id.data.length; i += 4) {
+      const v = 90 + Math.random() * 76;
+      id.data[i] = id.data[i + 1] = id.data[i + 2] = v;
+      id.data[i + 3] = 255;
+    }
+    g.putImageData(id, 0, 0);
+  }
+  const grainPat = ctx.createPattern(grainTile, "repeat");
+  /* 相位 → 相邻两屏主题色的线性插值（背景微染/柔光/文字点缀共用） */
+  const mixTone = (ph) => {
+    const a = Math.min(TONES.length - 1, Math.floor(ph));
+    const b = Math.min(TONES.length - 1, a + 1);
+    const k = ph - a;
+    return TONES[a].map((v, i) => v + (TONES[b][i] - v) * k);
+  };
+  /* 一团径向色斑（氛围光斑 / bokeh 共用画法） */
+  const blob = (x, y, r, c, al) => {
+    const g = ctx.createRadialGradient(x, y, 0, x, y, r);
+    g.addColorStop(0, `rgba(${Math.round(c[0])},${Math.round(c[1])},${Math.round(c[2])},${al})`);
+    g.addColorStop(1, `rgba(${Math.round(c[0])},${Math.round(c[1])},${Math.round(c[2])},0)`);
+    ctx.fillStyle = g;
+    ctx.fillRect(x - r, y - r, r * 2, r * 2);
+  };
   let phase = 0;
   let target = 0;
   let intro = still ? 1 : 0;
   let raf = 0;
+  let idleT = 0; // 静止期的星尘心跳定时器
   let introStart = 0;
+  let step = 0;     // 已落定的屏号
+  let actCur = 0;   // 当前屏聚形后动画的剧本进度 0→1
+  let actStart = 0; // 动画起播时间戳（0 = 未起播）
+  let busy = true;  // 剧本进行中（锁输入）；开场聚形后自动播 00 屏动画再亮提示
+  let phaseFrom = 0; // 本段换屏的相位起点
+  let transStart = 0; // 本段换屏起播时间
+  const hintEl = canvas.parentElement ? canvas.parentElement.querySelector(".land-hint") : null;
+  const skipEl = canvas.parentElement ? canvas.parentElement.querySelector(".land-skip") : null;
+  const hint = (show) => {
+    if (hintEl) hintEl.classList.toggle("show", show && !busy && step < figs.length - 1);
+  };
+  const syncSkip = () => {
+    if (skipEl) skipEl.style.visibility = step >= figs.length - 1 ? "hidden" : "";
+  };
 
   const build = () => {
     const dpr = Math.min(window.devicePixelRatio || 1, 2);
@@ -573,78 +718,414 @@ function mountSketch(canvas, scroller, rail, progress) {
     canvas.width = Math.round(W * dpr); canvas.height = Math.round(H * dpr);
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     const narrow = W < 920;
-    size = narrow ? Math.min(W * 0.34, H * 0.2) : Math.min(H * 0.32, W * 0.2);
-    cx = narrow ? W * 0.5 : W * 0.66;
-    cy = narrow ? H * 0.27 : H * 0.5;
-    dot = narrow ? 1.15 : 1.35;
-    const spacing = narrow ? 4.2 : 4.6;
+    const mid = !narrow && W < 1280;
+    /* 文字与图形逐屏左右对调（偶数屏文字左/图形右，奇数屏反之）；
+       竖直位置由 JS 写 top、与图形中心对齐，整列放不下时向上收敛：
+       顶部最少 72px、底部留 24px，保证不裁字（短屏配合 CSS max-height 收紧一档） */
+    const inners = [...scroller.querySelectorAll(".snap-inner")];
+    const hh = inners.reduce((m, el) => Math.max(m, el.offsetHeight), 0) || H * 0.5;
+    let textTop;
+    if (narrow) {
+      const figSpace = Math.max(140, H - hh - 40);
+      size = Math.min(W * 0.5, figSpace * 0.5);
+      gy = 10 + figSpace / 2;
+      gxA = inners.map(() => W * 0.5);
+      textTop = Math.max(72, Math.min(H - 24 - hh, 10 + figSpace + 16));
+    } else {
+      const mL = Math.max(120, W * 0.13); // 左列文字边距（与 CSS --col-pad 一致，更靠中）
+      const mR = Math.max(88, W * 0.09);  // 右列文字边距
+      const colW = mid ? 360 : 440;
+      const figM = Math.max(72, W * 0.05); // 图形区域的左右边距（宽图如「树」也不贴边）
+      const rightRegion = [mL + colW + 48, W - figM]; // 文字在左时图形的区域
+      const leftRegion = [figM, W - mR - colW - 48];  // 文字在右时图形的区域
+      const availEven = rightRegion[1] - rightRegion[0];
+      const availOdd = leftRegion[1] - leftRegion[0];
+      size = Math.min(H * 0.42, availEven * 0.38, availOdd * 0.38);
+      gy = H * 0.5;
+      gxA = inners.map((_, i) => {
+        const r = i % 2 === 0 ? rightRegion : leftRegion;
+        return (r[0] + r[1]) / 2;
+      });
+      textTop = Math.max(72, (H - hh) / 2);
+    }
+    inners.forEach((el) => { el.style.top = `${textTop}px`; });
+    dot = narrow ? 0.85 : 0.95;
+    const spacing = narrow ? 1.8 : 1.6; // 更密：细粒子密排 + 横向散布铺成粗笔画
     const raws = SKETCHES.map((f) => f());
-    const need = raws.map((st) => Math.ceil((st.reduce((s, x) => s + strokeLength(x.pts), 0) * size) / spacing));
+    const totalLen = (st) => st.reduce((s, x) => s + strokeLength(x.pts), 0);
+    const need = raws.map((st) => Math.ceil((totalLen(st) * size) / spacing));
     N = Math.max(...need);
-    figs = raws.map((st, k) => {
+    // 每张图只点亮自己的 need 颗，保证各图点距一致；其余粒子跟着走但不可见
+    const sample = (st, want) => {
       const f = sampleSketch(st, N);
-      // 每张图只点亮 need[k] 颗，保证各图点距一致；其余粒子跟着走但不可见
       const vis = new Uint8Array(N);
-      for (let j = 0; j < need[k]; j++) vis[Math.floor((j * N) / need[k])] = 1;
+      for (let j = 0; j < want; j++) vis[Math.floor((j * N) / want)] = 1;
+      // 带 part 标记的笔画 → 粒子分组表（1 起，0 = 无分组），供聚形后动画用
+      const names = [];
+      const pid = new Uint8Array(N);
+      st.forEach((s2, si) => {
+        if (!s2.part) return;
+        let id = names.indexOf(s2.part) + 1;
+        if (!id) { names.push(s2.part); id = names.length; }
+        for (let j = 0; j < N; j++) if (f.sid[j] === si) pid[j] = id;
+      });
+      f.pid = pid;
+      f.pnames = names;
       f.vis = vis;
       return f;
+    };
+    figs = raws.map((st, k) => sample(st, need[k]));
+    // 04「待办圈 → 对勾」的形变目标：沿对勾折线按弧长均匀取点，与圈上粒子一一对应
+    const spec4 = FIG_ANIMS[4] && FIG_ANIMS[4].parts.todo;
+    if (figs[4] && figs[4].pid && spec4) {
+      const f4 = figs[4];
+      const mid = f4.pnames.indexOf("todo") + 1;
+      const idxs = [];
+      for (let j = 0; j < N; j++) if (f4.pid[j] === mid) idxs.push(j);
+      const [p0, p1, p2] = spec4.morphTo;
+      const L1 = Math.hypot(p1[0] - p0[0], p1[1] - p0[1]);
+      const L2 = Math.hypot(p2[0] - p1[0], p2[1] - p1[1]);
+      const TT = L1 + L2;
+      const tgt = new Float32Array(N * 2);
+      idxs.forEach((j, q2) => {
+        const d = idxs.length === 1 ? 0 : (q2 / (idxs.length - 1)) * TT;
+        let k2;
+        if (d <= L1) {
+          k2 = L1 ? d / L1 : 0;
+          tgt[j * 2] = p0[0] + (p1[0] - p0[0]) * k2;
+          tgt[j * 2 + 1] = p0[1] + (p1[1] - p0[1]) * k2;
+        } else {
+          k2 = L2 ? (d - L1) / L2 : 0;
+          tgt[j * 2] = p1[0] + (p2[0] - p1[0]) * k2;
+          tgt[j * 2 + 1] = p1[1] + (p2[1] - p1[1]) * k2;
+        }
+      });
+      f4.morph = tgt;
+    }
+    // 每个采样点的路径法线：细粒子沿法线横向散布，铺出有颗粒感的粗笔画
+    figs.forEach((f) => {
+      const nx = new Float32Array(N); const ny = new Float32Array(N);
+      for (let i = 0; i < N; i++) {
+        const i0 = Math.max(0, i - 2); const i1 = Math.min(N - 1, i + 2);
+        const dx = f.xy[i1 * 2] - f.xy[i0 * 2];
+        const dy = f.xy[i1 * 2 + 1] - f.xy[i0 * 2 + 1];
+        const L = Math.hypot(dx, dy) || 1;
+        nx[i] = -dy / L; ny[i] = dx / L;
+      }
+      f.nx = nx; f.ny = ny;
     });
-    shown = Array.from({ length: N }, (_, i) => {
-      const ang = unitHash(i, 2) * Math.PI * 2;
-      const rad = 1.2 + unitHash(i, 3) * 0.9;
-      return [Math.cos(ang) * rad, Math.sin(ang) * rad];
-    });
+    scatter = Array.from({ length: N }, (_, i) => [
+      W * (0.06 + 0.88 * unitHash(i, 11)),
+      H * (0.06 + 0.88 * unitHash(i, 13)),
+    ]);
+    // 星尘三层：远景细点（多而暗）→ 中景点 → 近景 bokeh 软斑（大而更淡、漂移更快），带出纵深
+    dust = [];
+    const addDust = (n, rr, ar, sp, soft) => {
+      for (let k = 0; k < n; k++) {
+        const s = dust.length;
+        dust.push({
+          x: unitHash(s, 19), y: unitHash(s, 23),
+          r: rr[0] + unitHash(s, 29) * (rr[1] - rr[0]),
+          p: unitHash(s, 31) * Math.PI * 2,
+          w: 0.4 + unitHash(s, 37) * 0.9,
+          a: ar[0] + unitHash(s, 41) * (ar[1] - ar[0]),
+          sp, soft,
+        });
+      }
+    };
+    const nn = narrow ? 0.55 : 1;
+    addDust(Math.round(74 * nn), [0.5, 1.3], [0.035, 0.09], 0.5, false);
+    addDust(Math.round(34 * nn), [0.9, 1.9], [0.05, 0.12], 1, false);
+    addDust(narrow ? 7 : 13, [6, 16], [0.028, 0.06], 1.7, true);
+    // 星座网节点：向画面中央聚拢（左右两侧留给文字列），小幅漂移，连线随距离实时增减
+    plex = Array.from({ length: narrow ? 12 : 24 }, (_, i) => ({
+      x: 0.5 + (unitHash(i, 53) - 0.5) * 0.78,
+      y: 0.08 + 0.84 * unitHash(i, 59),
+      p: unitHash(i, 61) * Math.PI * 2,
+      sp: 0.4 + unitHash(i, 67) * 0.7,
+      r: 1.1 + unitHash(i, 71),
+    }));
   };
 
   const ease = (t) => (t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2);
 
-  const draw = () => {
-    ctx.clearRect(0, 0, W, H);
+  /* 聚形后动画进度：当前屏由剧本播放（actCur），已越过的屏视为播完，未到的屏为 0 */
+  const actOf = (idx) => (idx === step ? actCur : idx < step ? 1 : 0);
+
+  /* 聚形后动画的逐帧参数；ang 类预乘好 cos/sin，sweep/fill/flat 按各自类型展开 */
+  const animsOf = (idx, tm2) => {
+    const spec = FIG_ANIMS[idx];
+    if (!spec) return null;
+    const act = actOf(idx);
+    const out = {};
+    for (const name of Object.keys(spec.parts)) {
+      const c = spec.parts[name];
+      if (c.ang) {
+        const ang = c.ang(act, tm2);
+        out[name] = { ca: Math.cos(ang), sa: Math.sin(ang), px: c.pivot[0], py: c.pivot[1] };
+      } else if (c.persp) {
+        const ang = c.persp.ang(act);
+        out[name] = {
+          hx: c.persp.hinge[0], yc: c.persp.yc, w: c.persp.w, pf: c.persp.pf,
+          co: Math.cos(ang), si: Math.sin(ang),
+        };
+      } else if (c.sweep) {
+        out[name] = {
+          sweep: c.sweep.base + c.sweep.span * (1 - Math.pow(1 - act, 3)),
+          from: c.sweep.from, sx: c.pivot[0], sy: c.pivot[1],
+        };
+      } else if (c.reveal) {
+        out[name] = { reveal: c.reveal(act) }; // 门内路面：随开门渐显
+      } else if (c.morphTo) {
+        out[name] = { morph: true, k: 1 - Math.pow(1 - act, 3) };
+      } else if (c.light !== undefined) {
+        out[name] = { light: Math.min(1, Math.max(0, act * 4 - c.light)), fill: c.fill || null };
+      }
+    }
+    return out;
+  };
+
+  /* 每屏一色（参考彩色 WebGL 粒子站）：背景向主题色微染、图形后一团柔光、强调笔画换色，
+  全部随相位在相邻两色间连续过渡；粒子换图途中先均匀散布全屏再聚回 */
+  const draw = (now) => {
+    if (!figs.length) return;
+    const tone = mixTone(phase);
+    const bg = mixTone(phase).map((v, i) => Math.round(v * 0.09 + [12, 15, 14][i] * 0.91));
+    ctx.fillStyle = `rgb(${bg[0]},${bg[1]},${bg[2]})`;
+    ctx.fillRect(0, 0, W, H);
     const a = Math.min(figs.length - 1, Math.floor(phase));
     const b = Math.min(figs.length - 1, a + 1);
-    const T = phase - a;
-    const A = figs[a];
-    const B = figs[b];
-    const introE = ease(intro);
-    let lastStyle = "";
-    for (let i = 0; i < N; i++) {
-      const f = i / N;
-      const local = still ? (T > 0.5 ? 1 : 0) : ease(Math.min(1, Math.max(0, (T - f * 0.35) / 0.65)));
-      const ax = A.xy[i * 2]; const ay = A.xy[i * 2 + 1];
-      const bx = B.xy[i * 2]; const by = B.xy[i * 2 + 1];
-      let x = ax + (bx - ax) * local;
-      let y = ay + (by - ay) * local;
-      const lift = Math.sin(Math.PI * local);
-      if (lift > 0.001) {
-        const dx = bx - ax; const dy = by - ay;
-        const len = Math.hypot(dx, dy) || 1;
-        const amp = (0.08 + unitHash(i, 7) * 0.14) * (unitHash(i, 9) > 0.5 ? 1 : -1) * lift;
-        x += (-dy / len) * amp;
-        y += (dx / len) * amp;
+    const t = phase - a;
+    /* 图形锚点随相位在左右两个区域间插值横移（与文字对调），粒子散开途中完成换位 */
+    const anchorT = still ? (t >= 0.5 ? 1 : 0) : ease(Math.min(1, Math.max(0, t / 0.8)));
+    const gxCur = gxA.length ? gxA[a] + (gxA[b] - gxA[a]) * anchorT : W * 0.5;
+
+    /* 氛围：四团大范围色斑几乎铺满画面（图形后主光斑 + 本屏色×2 + 下一屏色对角）缓慢漂移，
+       背景有了色彩空间而不是单点光源（reduced-motion 时静止） */
+    const tm = still ? 0 : (now || 0) / 1000;
+    const next = mixTone(Math.min(phase + 1, TONES.length - 1));
+    const dr = (p, amp) => (still ? 0 : Math.sin(tm * 0.05 + p) * amp);
+    blob(gxCur + dr(0.3, 26), gy + dr(1.1, 20), Math.max(size * 2, H * 0.6), tone, 0.2);
+    blob(gxCur - W * 0.22 + dr(2.2, 22), gy + H * 0.22 + dr(3.1, 18), H * 0.85, tone, 0.1);
+    blob(W * 0.12 + dr(4.0, 20), H * 0.82 + dr(5.2, 16), H * 0.9, next, 0.09);
+    blob(W - gxCur + dr(6.1, 18), H * 0.16 + dr(7.3, 14), H * 0.78, tone, 0.07);
+
+    /* 星座网：节点缓慢漂移，近邻之间牵起随距离淡出的细线——背景有可辨的图案结构 */
+    const linkR = Math.min(W, H) * 0.22;
+    const pts = plex.map((n) => [
+      n.x * W + Math.sin(tm * 0.05 * n.sp + n.p) * 16,
+      n.y * H + Math.cos(tm * 0.04 * n.sp + n.p * 1.3) * 12,
+    ]);
+    const tcol = `rgba(${Math.round(tone[0])},${Math.round(tone[1])},${Math.round(tone[2])},1)`;
+    /* 当前屏文字列所在的纵带：穿过去的连线淡化，别在字底下拉线 */
+    const tx0 = (a % 2 === 0 ? 0.06 : 0.55) * W;
+    const tx1 = tx0 + W * 0.39;
+    const inTextBand = (p) => p[0] > tx0 && p[0] < tx1 && p[1] > H * 0.15 && p[1] < H * 0.88;
+    ctx.lineWidth = 1;
+    ctx.strokeStyle = tcol;
+    for (let i = 0; i < pts.length; i++) {
+      for (let j = i + 1; j < pts.length; j++) {
+        const d = Math.hypot(pts[i][0] - pts[j][0], pts[i][1] - pts[j][1]);
+        if (d >= linkR) continue;
+        ctx.globalAlpha = (1 - d / linkR) * 0.14 * (inTextBand(pts[i]) || inTextBand(pts[j]) ? 0.3 : 1);
+        ctx.beginPath();
+        ctx.moveTo(pts[i][0], pts[i][1]);
+        ctx.lineTo(pts[j][0], pts[j][1]);
+        ctx.stroke();
       }
-      if (introE < 1) {
-        x = shown[i][0] + (x - shown[i][0]) * Math.min(1, Math.max(0, (intro - f * 0.3) / 0.7));
-        y = shown[i][1] + (y - shown[i][1]) * Math.min(1, Math.max(0, (intro - f * 0.3) / 0.7));
-      }
-      const vis = A.vis[i] + (B.vis[i] - A.vis[i]) * local;
-      const alpha = vis * (1 - 0.35 * lift) * Math.min(1, intro * 1.4);
-      if (alpha < 0.03) continue;
-      const style = (local < 0.5 ? A.acc[i] : B.acc[i]) ? ACCENT : INK;
-      if (style !== lastStyle) { ctx.fillStyle = style; lastStyle = style; }
-      ctx.globalAlpha = alpha;
+    }
+    ctx.fillStyle = tcol;
+    plex.forEach((n, i) => {
+      ctx.globalAlpha = 0.12 + 0.08 * n.sp;
       ctx.beginPath();
-      ctx.arc(cx + x * size, cy + y * size, dot * (1 - 0.2 * lift), 0, Math.PI * 2);
+      ctx.arc(pts[i][0], pts[i][1], n.r, 0, Math.PI * 2);
+      ctx.fill();
+    });
+    ctx.globalAlpha = 1;
+
+    /* 星尘三层：远景细点 / 中景点 / 近景 bokeh 软斑，漂移速度不同带出纵深 */
+    for (const d of dust) {
+      const x = d.x * W + Math.sin(tm * 0.12 + d.p) * 18 * d.sp;
+      const y = d.y * H + Math.cos(tm * 0.09 + d.p * 1.7) * 14 * d.sp;
+      const tw = still ? 0.8 : 0.55 + 0.45 * Math.sin(tm * d.w + d.p);
+      ctx.globalAlpha = d.a * tw;
+      if (d.soft) {
+        blob(x, y, d.r, tone, 1);
+        ctx.globalAlpha = 1;
+        continue;
+      }
+      ctx.fillStyle = `rgb(${Math.round(tone[0])},${Math.round(tone[1])},${Math.round(tone[2])})`;
+      ctx.beginPath();
+      ctx.arc(x, y, d.r, 0, Math.PI * 2);
       ctx.fill();
     }
     ctx.globalAlpha = 1;
+
+    /* 暗角：四周压暗，视线聚到画面中部（DOM 文字在 canvas 之上，不受影响） */
+    const vg = ctx.createRadialGradient(W / 2, H / 2, Math.min(W, H) * 0.36, W / 2, H / 2, Math.hypot(W, H) / 2);
+    vg.addColorStop(0, "rgba(0,0,0,0)");
+    vg.addColorStop(1, "rgba(0,0,0,0.18)");
+    ctx.fillStyle = vg;
+    ctx.fillRect(0, 0, W, H);
+
+    const A = still && t >= 0.5 ? figs[b] : figs[a];
+    const B = still ? A : figs[b];
+    const fxA = still ? null : animsOf(a, tm);
+    const fxB = still ? null : animsOf(b, tm);
+    /* 05 点亮的节点：环内填成实心并发光（实心核 + 柔光晕，画在环粒子下面） */
+    const drawFills = (fx) => {
+      if (!fx) return;
+      for (const nm2 of Object.keys(fx)) {
+        const f2 = fx[nm2];
+        if (f2.fill && f2.light > 0) {
+          const fxp = gxCur + f2.fill[0] * size;
+          const fyp = gy + f2.fill[1] * size;
+          const fr = f2.fill[2] * size;
+          blob(fxp, fyp, fr * 2.6, tone, 0.3 * f2.light);
+          blob(fxp, fyp, fr * 0.95, tone, 0.85 * f2.light);
+        }
+      }
+    };
+    drawFills(fxA);
+    drawFills(fxB);
+    for (let i = 0; i < N; i++) {
+      const f = i / N;
+      const local = still ? (t >= 0.5 ? 1 : 0) : ease(Math.min(1, Math.max(0, (t - f * 0.35) / 0.65)));
+      const ax = A.xy[i * 2]; const ay = A.xy[i * 2 + 1];
+      const bx = B.xy[i * 2]; const by = B.xy[i * 2 + 1];
+      const x = ax + (bx - ax) * local;
+      const y = ay + (by - ay) * local;
+      /* 聚形后动画：主导图形里带分组的粒子做 旋转（问号/罗盘/时针）/ 向里推（门）/
+         弧线扫过显出（进度弧）/ 形变换色（待办圈→对勾）/ 依次点亮（树节点） */
+      let xx = x; let yy = y; let lightK = 0; let recolor = false; let cut = false; let revealK = 1;
+      const dom = local < 0.5 ? A : B;
+      const domIdx = local < 0.5 ? a : b;
+      const fx = domIdx === a ? fxA : fxB;
+      if (fx && dom.pid && dom.pid[i]) {
+        const f2 = fx[dom.pnames[dom.pid[i] - 1]];
+        if (f2) {
+          if (f2.ca !== undefined) {
+            const dx0 = xx - f2.px; const dy0 = yy - f2.py;
+            xx = f2.px + dx0 * f2.ca - dy0 * f2.sa;
+            yy = f2.py + dx0 * f2.sa + dy0 * f2.ca;
+          } else if (f2.hx !== undefined) {
+            /* 绿门向里推：绕左铰链竖轴旋转 + 透视——远端向铰链收拢、向门高中线收缩 */
+            const u0 = Math.min(1.2, Math.max(0, (xx - f2.hx) / f2.w));
+            const p = 1 / (1 + u0 * f2.w * f2.si * f2.pf);
+            xx = f2.hx + u0 * f2.w * f2.co * p;
+            yy = f2.yc + (yy - f2.yc) * p;
+          } else if (f2.sweep !== undefined) {
+            const aP = Math.atan2(yy - f2.sy, xx - f2.sx);
+            if ((aP - f2.from + Math.PI * 2.001) % (Math.PI * 2) > f2.sweep) cut = true;
+          } else if (f2.morph && dom.morph) {
+            xx += (dom.morph[i * 2] - xx) * f2.k;
+            yy += (dom.morph[i * 2 + 1] - yy) * f2.k;
+            if (f2.k > 0.5) recolor = true;
+          } else if (f2.light > 0) {
+            lightK = f2.light;
+          } else if (f2.reveal !== undefined) {
+            revealK = f2.reveal; // 门内路面随开门渐显
+          }
+        }
+      }
+      /* 横向散布：细粒子沿笔画法线铺开成粗带（±2.6×dot），转场时法线归零收成细线飞走 */
+      const lat = (unitHash(i, 47) * 2 - 1) * 2.6 * dot;
+      const nxv = A.nx[i] + (B.nx[i] - A.nx[i]) * local;
+      const nyv = A.ny[i] + (B.ny[i] - A.ny[i]) * local;
+      let px = gxCur + xx * size + nxv * lat;
+      let py = gy + yy * size + nyv * lat;
+      const lift = Math.sin(Math.PI * local); // 散开程度：0 聚成图形、1 均匀铺满全屏
+      if (lift > 0.001) {
+        px += (scatter[i][0] - px) * lift;
+        py += (scatter[i][1] - py) * lift;
+      }
+      if (intro < 1) { // 开场：从全屏散布的暗点聚成首图
+        const k2 = Math.min(1, Math.max(0, (intro - f * 0.3) / 0.7));
+        px += (scatter[i][0] - px) * (1 - k2);
+        py += (scatter[i][1] - py) * (1 - k2);
+      }
+      const vis = A.vis[i] + (B.vis[i] - A.vis[i]) * local;
+      const focus = 1 - lift; // 聚形度：散开暗而细，聚形亮而粗，聚拢完成时最强
+      let alpha = vis * (0.28 + 0.72 * Math.pow(focus, 1.4)) * Math.min(1, intro * 1.4) * revealK;
+      if (cut || alpha < 0.03) continue; // 进度弧只显出指针扫过的部分；门内路面随开门渐显
+      let spr = (local < 0.5 ? A.acc[i] : B.acc[i]) ? (local < 0.5 ? SPRS[a] : SPRS[b]) : SPR_INK;
+      if (recolor) spr = SPRS[domIdx]; // 待办圈形变过半后换成本屏主题色
+      /* 背景回声：同一图形放大 2.1 倍铺在画面中心后面，淡而可辨的大轮廓（每 3 颗画 1 颗） */
+      if (i % 3 === 0) {
+        const gpx = W / 2 + x * size * 2.1;
+        const gpy = H / 2 + y * size * 2.1;
+        const gs = dot * 3;
+        ctx.globalAlpha = alpha * 0.15;
+        ctx.drawImage(spr, gpx - gs, gpy - gs, gs * 2, gs * 2);
+      }
+      const jit = 0.75 + unitHash(i, 17) * 0.6; // 粒径抖动：大小参差，聚形后不是均匀的「灯管」
+      let r = dot * (0.55 + 1.05 * focus) * jit;
+      if (lightK) { // 树节点依次点亮：变亮变大，点亮的瞬间鼓一下再落定
+        alpha = Math.min(1, alpha * (1 + 0.8 * lightK));
+        r *= 1 + 0.35 * lightK + Math.sin(lightK * Math.PI) * 0.55;
+      }
+      const s = r * 2.2; // 光晕收小：亮在芯、不在晕
+      ctx.globalAlpha = alpha;
+      ctx.drawImage(spr, px - s, py - s, s * 2, s * 2);
+    }
+    ctx.globalAlpha = 1;
+
+    /* 胶片颗粒：静态噪点以 overlay 叠全屏——亮部见纹理、暗部保持干净 */
+    if (grainPat) {
+      ctx.globalCompositeOperation = "overlay";
+      ctx.globalAlpha = 0.08;
+      ctx.fillStyle = grainPat;
+      ctx.fillRect(0, 0, W, H);
+      ctx.globalCompositeOperation = "source-over";
+      ctx.globalAlpha = 1;
+    }
   };
 
+  const sections = [...scroller.querySelectorAll(".snap")];
+
   const syncRail = () => {
-    const active = Math.min(nos.length - 1, Math.round(phase));
-    nos.forEach((d, i) => d.classList.toggle("on", i === active));
-    if (mark && nos[active]) mark.style.transform = `translateY(${nos[active].offsetTop}px)`;
-    const limit = Math.max(1, scroller.scrollHeight - scroller.clientHeight);
-    if (bar) bar.style.width = `${Math.min(1, scroller.scrollTop / limit) * 100}%`;
+    const active = Math.min(figs.length - 1, Math.round(phase));
+    /* 文字点缀（kicker/大编号/滚动提示线/进度条）的 --tone 随屏换主题色、步号随屏跳；
+       换屏发生在文字淡出的间隙，跳变不会被看见 */
+    if (active !== lastActive) {
+      lastActive = active;
+      const tn = TONES[active];
+      (canvas.parentElement || canvas).style.setProperty("--tone", `rgb(${tn[0]},${tn[1]},${tn[2]})`);
+      if (stepCur) stepCur.textContent = String(active).padStart(2, "0");
+    }
+    /* 左缘纵向进度轨道随换屏相位连续生长 */
+    if (stepFill) {
+      stepFill.style.height = `${Math.min(1, phase / Math.max(1, figs.length - 1)) * 100}%`;
+    }
+    /* 文字钉在视口不动，只按相位渐显渐隐：行进后段（聚形近完成）渐入，
+       开始滚向下一步就渐出；首屏等开场粒子聚完再出现 */
+    sections.forEach((sec, i) => {
+      const d = phase - i;
+      let vis;
+      if (still) vis = d > -0.5 && d < 0.5 ? 1 : 0;
+      else if (d <= -0.36 || d >= 0.18) vis = 0;
+      else if (d < -0.03) vis = (d + 0.36) / 0.33;
+      else if (d <= 0.02) vis = 1;
+      else vis = 1 - (d - 0.02) / 0.16;
+      if (i === 0) vis *= Math.min(1, Math.max(0, (intro - 0.5) / 0.4));
+      sec.style.opacity = String(Math.min(1, Math.max(0, vis)));
+      sec.classList.toggle("lit", vis > 0.5);
+    });
+  };
+
+  /* 一次滚轮/滑动/按键 = 走一整段剧本：粒子散开聚形换位 → 文字两段进场 →
+     聚形后动画 → 亮「滚动以继续」提示；期间锁输入，不吃连续滚动 */
+  const go = (n) => {
+    const next = Math.min(figs.length - 1, Math.max(0, n));
+    if (busy || next === step) return;
+    busy = true;
+    actCur = 0;
+    actStart = 0;
+    phaseFrom = phase;
+    transStart = 0;
+    target = next;
+    hint(false);
+    wake();
   };
 
   const tick = (now) => {
@@ -653,35 +1134,95 @@ function mountSketch(canvas, scroller, rail, progress) {
     let moving = false;
     if (intro < 1) {
       if (!introStart) introStart = now;
-      intro = Math.min(1, (now - introStart) / 1600);
+      intro = Math.min(1, (now - introStart) / 2200);
       moving = true;
     }
-    const gap = target - phase;
-    if (Math.abs(gap) > 0.0005) {
-      phase += still ? gap : gap * 0.14;
+    if (busy && intro >= 1) { // 开场聚形先走完，剧本才开始——00 屏的过程要看得见
+      if (!transStart) transStart = now;
+      const kk = still ? 1 : Math.min(1, (now - transStart) / 4200); // 换屏整段 4.2s，帧率无关
+      const ee = kk * kk * (3 - 2 * kk); // smoothstep：缓起缓收，全程可见的运动
+      phase = phaseFrom + (target - phaseFrom) * ee;
       moving = true;
-    } else {
-      phase = target;
+      /* 文字进场刚收尾（差 0.02 相位）就起播本屏动画——提示与动画同时亮、输入同时解锁 */
+      if (target - phase <= 0.02) {
+        phase = target;
+        step = target;
+        syncSkip();
+        if (!actStart) {
+          actStart = now;
+          busy = false;
+          hint(true);
+        }
+      }
     }
-    draw();
+    if (!busy && actStart && actCur < 1) { // 动画与收尾并行，播完转入空闲心跳
+      actCur = still ? 1 : Math.min(1, (now - actStart) / 1600);
+      moving = true;
+    }
+    draw(now);
     syncRail();
-    if (moving) raf = requestAnimationFrame(tick);
+    if (moving || busy) raf = requestAnimationFrame(tick);
+    else if (!still && dust.length) {
+      idleT = setTimeout(() => { idleT = 0; raf = requestAnimationFrame(tick); }, 80);
+    }
   };
-  const wake = () => { if (!raf) raf = requestAnimationFrame(tick); };
-  const onScroll = () => { target = scrollTarget(scroller); wake(); };
-  const onResize = () => { build(); onScroll(); };
+  const wake = () => {
+    if (idleT) { clearTimeout(idleT); idleT = 0; }
+    if (!raf) raf = requestAnimationFrame(tick);
+  };
+  const onResize = () => { build(); wake(); };
+
+  /* 步进输入：滚轮（阈值 + busy 锁）、触摸滑动、方向键/翻页键/空格 */
+  const onWheel = (e) => {
+    if (Math.abs(e.deltaY) <= Math.abs(e.deltaX)) return;
+    e.preventDefault();
+    if (e.deltaY > 12) go(step + 1);
+    else if (e.deltaY < -12) go(step - 1);
+  };
+  let touchY = null;
+  const onTouchStart = (e) => { touchY = e.touches[0].clientY; };
+  const onTouchMove = (e) => { e.preventDefault(); };
+  const onTouchEnd = (e) => {
+    if (touchY == null) return;
+    const d = touchY - e.changedTouches[0].clientY;
+    touchY = null;
+    if (d > 46) go(step + 1);
+    else if (d < -46) go(step - 1);
+  };
+  const onKey = (e) => {
+    if (e.target && e.target.closest && e.target.closest("button, input, textarea")) return;
+    if (e.key === "ArrowDown" || e.key === "PageDown" || e.key === " ") { e.preventDefault(); go(step + 1); }
+    else if (e.key === "ArrowUp" || e.key === "PageUp") { e.preventDefault(); go(step - 1); }
+    else if (e.key === "Home") { e.preventDefault(); go(0); }
+    else if (e.key === "End") { e.preventDefault(); go(figs.length - 1); }
+  };
 
   build();
-  target = scrollTarget(scroller);
-  phase = target;
-  scroller.addEventListener("scroll", onScroll, { passive: true });
+  target = 0;
+  phase = 0;
+  step = 0;
+  window.addEventListener("wheel", onWheel, { passive: false });
+  window.addEventListener("touchstart", onTouchStart, { passive: true });
+  window.addEventListener("touchmove", onTouchMove, { passive: false });
+  window.addEventListener("touchend", onTouchEnd, { passive: true });
+  window.addEventListener("keydown", onKey);
   window.addEventListener("resize", onResize);
+  // 衬线字体到位后行高会变：重新量内容高度再收敛钉位（采样带 unitHash，是确定性的，重建无跳变）
+  if (document.fonts && document.fonts.ready) {
+    document.fonts.ready.then(() => { if (canvas.isConnected) { build(); wake(); } });
+  }
   wake();
 
   return () => {
     cancelAnimationFrame(raf);
     raf = 0;
-    scroller.removeEventListener("scroll", onScroll);
+    if (idleT) clearTimeout(idleT);
+    idleT = 0;
+    window.removeEventListener("wheel", onWheel);
+    window.removeEventListener("touchstart", onTouchStart);
+    window.removeEventListener("touchmove", onTouchMove);
+    window.removeEventListener("touchend", onTouchEnd);
+    window.removeEventListener("keydown", onKey);
     window.removeEventListener("resize", onResize);
   };
 }
@@ -1064,9 +1605,9 @@ async function logout() {
 function accountPanel() {
   const box = el("section", "panel account-panel");
   box.appendChild(el("h3", "section-label", "账号"));
-  box.appendChild(el("p", "panel-sub", S.guest
-    ? `访客「${esc(S.nickname)}」：记录只能在这台浏览器里找回。绑定微信后换设备也能接着用。`
-    : `已用微信登录：${esc(S.nickname)}`));
+  box.appendChild(el("p", "panel-sub", S.wechat
+    ? `已用微信登录：${esc(S.nickname)}`
+    : `访客「${esc(S.nickname)}」。云上临时库回收后，这个浏览器里的旧账号会失效，重新进入即可。`));
   const acts = el("div", "account-actions");
   const add = (label, cls, fn) => {
     const b = el("button", cls, label);
@@ -1101,7 +1642,7 @@ function accountPanel() {
     const back = parked && parked.guest ? `删的只是这个账号；这台浏览器上停着的访客号「${parked.nickname}」不受影响，删完切回它。` : "";
     const typed = window.prompt(`删除后，库里你的所有记录会立刻清掉，不能恢复。${back}确定的话输入「删除」两个字：`);
     if (typed === null) return;
-    if (typed.trim() !== "删除") { toast("没有删除：输入的不是「删除」"); return; }
+    if (typed.trim() !== "删除") { toast("没有删除"); return; }
     try {
       await api("DELETE", "/api/me");
       if (back) {
@@ -1170,6 +1711,59 @@ function applyLlmPill(llm) {
   pill.onclick = () => openConnect();
 }
 
+function currentDirLabel() {
+  const saved = trail();
+  const field = activeField(saved);
+  return field ? dirTitle(saved.dir, field) : "";
+}
+
+function paintChrome() {
+  const nick = document.getElementById("userNickname");
+  if (nick) nick.textContent = S.nickname || "";
+  const chip = document.getElementById("dirChip");
+  if (!chip) return;
+  const name = currentDirLabel();
+  chip.textContent = name || "还没有方向";
+  chip.classList.toggle("empty", !name);
+}
+
+function closeUserMenu() {
+  const menu = document.getElementById("userMenu");
+  if (menu) menu.remove();
+  const btn = document.getElementById("userMenuBtn");
+  if (btn) btn.setAttribute("aria-expanded", "false");
+}
+
+async function openUserMenu() {
+  const wrap = document.querySelector(".user-menu-wrap");
+  const btn = document.getElementById("userMenuBtn");
+  if (!wrap || !btn || !S.uid) return;
+  if (document.getElementById("userMenu")) { closeUserMenu(); return; }
+  btn.setAttribute("aria-expanded", "true");
+  const menu = el("div", "user-menu");
+  menu.id = "userMenu";
+  menu.setAttribute("role", "menu");
+  menu.appendChild(el("p", "user-menu-kicker", "你的档案"));
+  try {
+    const bar = await portraitBar();
+    bar.classList.add("user-menu-portraits");
+    menu.appendChild(bar);
+  } catch (e) {
+    menu.appendChild(el("p", "form-note", e.message || "画像列表没加载出来"));
+  }
+  const go = (label, view) => {
+    const b = el("button", "user-menu-item", label);
+    b.type = "button";
+    b.setAttribute("role", "menuitem");
+    b.onclick = () => { closeUserMenu(); setView(view); };
+    return b;
+  };
+  menu.appendChild(go("继续聊", S.portraitTab || "dialogue"));
+  menu.appendChild(go("核对这些记录", "confirm"));
+  menu.appendChild(go("它记下的", "me"));
+  wrap.appendChild(menu);
+}
+
 /* ---------- 画像切换 ---------- */
 
 async function portraitBar() {
@@ -1213,7 +1807,7 @@ async function renderConfirm() {
   const [r, bar] = await Promise.all([api("GET", `/api/onboard/result?uid=${S.uid}`), portraitBar()]);
   if (stale(seq)) return;
   $app.innerHTML = "";
-  $app.appendChild(workspaceHead("画像"));
+  $app.appendChild(workspaceHead("核对", "说得不对就改，不属实就划掉。保存之后，方向才按你来。"));
   $app.appendChild(bar);
   $app.appendChild(portraitTabs("confirm"));
   const main = el("div", "panel");
@@ -1227,7 +1821,7 @@ async function renderConfirm() {
   if (drafts.length) {
     main.appendChild(el("p", "panel-sub", "这些是它从对话里记下的。说得不对就直接改，不属实就划掉。保存之后才会用来推荐方向。"));
   } else if (!others.length) {
-    main.appendChild(el("div", "note-box", "还没有可核对的记录。先在「对话」里回答几问。"));
+    main.appendChild(el("div", "note-box", "还没有可核对的记录。先去对话里聊几句。"));
   }
 
   drafts.forEach((f) => {
@@ -1286,7 +1880,7 @@ async function renderConfirm() {
    所以每个空格都带一句 why（来自后端 memory.COVERAGE_GROUPS）。 */
 function coverageBoard() {
   const box = el("div", "coverage");
-  box.appendChild(el("p", "section-label", "这些填得越全，我给的科研方向越准"));
+  box.appendChild(el("p", "section-label", "多记一条，方向就能对得更准"));
   const hintRow = el("p", "coverage-hint", "下面每一格都可以点。空着的也可以先在「对话」里随口说一句。");
   box.appendChild(hintRow);
   const grid = el("div", "cov-grid");
@@ -2129,6 +2723,13 @@ function openDirSheet(node, ctx) {
   }
   sheet.appendChild(el("p", "sheet-intro", esc(node.intro || (meta && meta.blurb) || "")));
   if (ctx.why) sheet.appendChild(el("p", "sheet-why", esc(ctx.why)));
+  if (ctx.reading && ctx.reading.title) {
+    const read = el("div", "sheet-reading");
+    read.appendChild(el("h4", "", "入门读物"));
+    read.appendChild(el("p", "reading-title", esc(ctx.reading.title)));
+    if (ctx.reading.why) read.appendChild(el("p", "reading-why", esc(ctx.reading.why)));
+    sheet.appendChild(read);
+  }
   if (node.children && node.children.length) {
     sheet.appendChild(el("p", "sheet-label", "往下"));
     const row = el("div", "sheet-nexts");
@@ -2225,9 +2826,12 @@ async function renderCards() {
   $app.append(recLine, confirmBar, stage, legend);
 
   const viewName = () => dirTitle(focus) || "未选方向";
-  const recWhy = () => {
+  const recCard = () => {
     const backend = window.RG_DIR ? RG_DIR.backendCode(focus) : "";
-    const card = cards.find((c) => c.direction && c.direction.code === backend);
+    return cards.find((c) => c.direction && c.direction.code === backend);
+  };
+  const recWhy = () => {
+    const card = recCard();
     return card && card.why_you;
   };
 
@@ -2244,6 +2848,7 @@ async function renderCards() {
       const switching = !!(chosenDir && chosenDir !== target);
       saveTrail({ code: backend, dir: target, done: [], tasks: {} }, true);
       S.myDir = undefined;
+      paintChrome();
       chosenCode = backend;
       chosenDir = target;
       const name = dirTitle(target) || "未选方向";
@@ -2261,7 +2866,7 @@ async function renderCards() {
     recLine.innerHTML = "";
     if (pane === "tutorial") return;
     if (!cards.length) {
-      recLine.appendChild(el("p", "", "这份画像还没有可对照的兴趣。先在画像里把对话做完，建议才会标到树上。"));
+      recLine.appendChild(el("p", "", "还没有可对照的兴趣。先去聊几句，建议才会标到树上。"));
       return;
     }
     const names = cards.map((c) => {
@@ -2269,7 +2874,7 @@ async function renderCards() {
       const id = window.RG_DIR && RG_DIR.legacyDir[code];
       return (id && RG_DIR.displayName(id)) || (FIELD_TREES[code] && FIELD_TREES[code].name) || (c.direction && c.direction.name) || "";
     }).filter(Boolean);
-    recLine.appendChild(el("p", "", `这份画像更贴近${names.map(esc).join("、")}。${esc(cards[0].why_you || "")}`));
+    recLine.appendChild(el("p", "", `按你刚说的，更贴近${names.map(esc).join("、")}。${esc(cards[0].why_you || "")}`));
     if (window.innerWidth < 920) {
       recLine.classList.add("clamp");
       recLine.onclick = () => recLine.classList.remove("clamp");
@@ -2336,6 +2941,7 @@ async function renderCards() {
       children: meta.children,
     }, {
       why: recWhy(),
+      reading: (recCard() || {}).reading,
       chosen: id === chosenDir,
       hasCurrent: !!chosenDir,
       onPick: showDir,
@@ -2727,7 +3333,7 @@ function taskPanelDone(p, task, opts) {
    以前这里是整页 return，所以「对话出了任务但任务区是空的」。 */
 function dialogueTaskSection(tasks) {
   const box = el("div", "panel dialogue-tasks");
-  box.appendChild(el("h3", "section-label", "对话给你的任务"));
+  box.appendChild(el("h3", "section-label", "对话给你的作业"));
   if (!tasks.length) {
     box.appendChild(el("p", "panel-sub",
       "还没有。在对话里点「就做这个」，任务会出现在这里，做完回对话继续。"));
@@ -2764,7 +3370,7 @@ async function renderWorkbench() {
   if (stale(seq)) return;
   $app.innerHTML = "";
   const wrap = el("div", "stagger");
-  wrap.appendChild(workspaceHead("任务", "对话里说「就做这个」产生的任务，和按方向路径排的练习，都在这里完成。"));
+  wrap.appendChild(workspaceHead("作业", "现在该交的放这里。做完交上去，按事先说好的几条对一下。"));
   $app.appendChild(wrap);
 
   const listed = taskRes.tasks || [];
@@ -2788,7 +3394,7 @@ async function renderWorkbench() {
   if (!code || !field) {
     // 注意：不再整页 return——上面已经画过对话任务了
     if (!fromDialogue.length) {
-      wrap.appendChild(emptyPanel("还没有任务。去对话里说你手上的情况，它会给你一个下一步；或者去方向区选一棵树。", "去对话", "dialogue"));
+      wrap.appendChild(emptyPanel("还没有要交的。去对话里说说手头的事，或先选定一个方向。", "去对话", "dialogue"));
     }
     return;
   }
@@ -2913,6 +3519,11 @@ function renderFeedbackInto(p) {
   const passed = (fb.rubric || []).filter((r) => r.pass).length;
   head.appendChild(el("div", "score-ring", `<span class="num">${passed}</span>/ ${(fb.rubric || []).length} 条做到`));
   box.appendChild(head);
+  if ((fb.rubric || []).length) {
+    const bar = el("div", "pass-bar");
+    (fb.rubric || []).forEach((r) => bar.appendChild(el("i", r.pass ? "ok" : "bad")));
+    box.appendChild(bar);
+  }
 
   const rub = el("div", "rubric-list");
   (fb.rubric || []).forEach((r) => {
@@ -2931,6 +3542,30 @@ function renderFeedbackInto(p) {
 }
 
 /* ---------- 今日 / ⑨ NBA ---------- */
+
+const NBA_ACTION_VIEW = {
+  micro_task: ["去做这一步", "workbench"],
+  explore_direction: ["去选方向", "cards"],
+  course_action: ["去选方向", "cards"],
+  read_paper: ["去研读", "read"],
+  ask_clarifying: ["去对话", "dialogue"],
+  review_progress: ["去记录", "me"],
+};
+
+function loopStrip(steps, nowIdx) {
+  const strip = el("nav", "loop-strip");
+  strip.setAttribute("aria-label", "科研入门闭环");
+  steps.forEach((s, i) => {
+    const cls = "loop-step" + (s.done ? " done" : "") + (i === nowIdx ? " now" : "");
+    const b = el("button", cls, `<i></i><span>${esc(s.label)}</span>`);
+    b.type = "button";
+    b.title = s.done ? `${s.label}：已走过` : i === nowIdx ? `${s.label}：当前这一步` : `${s.label}：还没到`;
+    if (i === nowIdx) b.setAttribute("aria-current", "step");
+    b.onclick = () => setView(s.view);
+    strip.appendChild(b);
+  });
+  return strip;
+}
 
 function goFindProjects(keywords) {
   // 进「项目 · 找项目」，方向和阶段交给服务端按记录预选（/api/projects/context）
@@ -2952,6 +3587,8 @@ async function renderToday() {
   const seq = S.renderSeq;
   await ensurePortrait();
   if (stale(seq)) return;
+  $app.innerHTML = "";
+  $app.appendChild(skeleton(3));
   const [taskRes, onboard, mine] = await Promise.all([
     api("GET", `/api/tasks?uid=${S.uid}`).catch(() => null),
     api("GET", `/api/onboard/result?uid=${S.uid}`).catch(() => null),
@@ -2959,6 +3596,7 @@ async function renderToday() {
   ]);
   if (stale(seq)) return;
   adoptDirection((onboard && onboard.facts) || []);
+  paintChrome();
   let saved = trail();
   if (taskRes && saved.code) {
     const merged = mergeTrail(saved.code, taskRes.tasks || []);
@@ -2981,17 +3619,17 @@ async function renderToday() {
   let title; let why; let primary; let alt = null;
   const goView = (label, view) => ({ label, run: () => setView(view) });
   if (!field && !talked) {
-    title = "先聊五个问题";
-    why = "它还不认识你。五个问题，大约五分钟：年级、基础、好奇什么、习惯怎么学。每一问都可以选「不知道」。";
+    title = "先聊聊你现在的情况";
+    why = "年级、已经会的、想试什么。说不清就说不知道。聊完再看方向。";
     primary = goView("去对话", "dialogue");
   } else if (!field && drafts) {
-    title = `核对它记下的 ${drafts} 条`;
-    why = "对话里记下的内容还是草稿。改掉不对的、划掉不属实的，方向建议才会按你来。";
+    title = `核对这些记录（${drafts} 条）`;
+    why = "刚才记下的还是草稿。改掉不对的、划掉不属实的，方向才按你来。";
     primary = goView("去核对", "confirm");
   } else if (!field) {
-    title = "选定一个方向";
-    why = "方向区是一棵学科树。按你的画像会标出建议。确认一个方向，任务从它的教程起点开始。";
-    primary = goView("去方向区", "cards");
+    title = "先选定一个方向";
+    why = "按你刚说的会标出建议。确认一个，作业从它的教程起点开始。";
+    primary = goView("去选方向", "cards");
   } else if (toFix) {
     let detail = null;
     try { detail = await api("GET", `/api/projects/${toFix.id}?uid=${S.uid}`); } catch (_) { /* 拿不到详情就用概要 */ }
@@ -3007,8 +3645,8 @@ async function renderToday() {
     primary = { label: "去交成果", run: () => openProject(toSubmit.id) };
     if (node) alt = { label: `先继续「${node.label}」`, run: () => setView("workbench") };
   } else if (doneTasks >= PROJECT_AFTER_TASKS) {
-    title = "找一个项目练手";
-    why = `你在「${field.name}」已经交过 ${doneTasks} 次小任务。二十分钟的任务练的是一个点，项目练的是把点连起来：从公开来源找一个真题，做完交一个压缩包。`;
+    title = "找一个真题练手";
+    why = `「${field.name}」已经交过 ${doneTasks} 次作业。作业练一个点，项目把点连起来：找一个公开真题，交一个压缩包。`;
     primary = { label: "去找项目", run: () => goFindProjects() };
     if (node) alt = { label: `先继续「${node.label}」`, run: () => setView("workbench") };
   } else if (node) {
@@ -3024,13 +3662,23 @@ async function renderToday() {
 
   $app.innerHTML = "";
   const wrap = el("div", "stagger");
-  wrap.appendChild(workspaceHead("今日"));
-  const status = el("div", "ws-status");
-  status.appendChild(el("span", "", field ? esc(dirTitle(saved.dir, field)) : "还没有方向"));
-  if (node) status.appendChild(el("span", "", `正在「${esc(node.label)}」`));
-  if (doneTasks) status.appendChild(el("span", "", `交过 ${doneTasks} 次小任务`));
-  if (projects.length) status.appendChild(el("span", "", `${projects.length} 个项目`));
+  wrap.appendChild(workspaceHead("今日", "打开就看这一件。"));
+  const status = el("div", "status-chips");
+  status.appendChild(el("span", "status-chip" + (field ? " on" : ""), field ? esc(dirTitle(saved.dir, field)) : "还没有方向"));
+  if (node) status.appendChild(el("span", "status-chip", `正在「${esc(node.label)}」`));
+  if (doneTasks) status.appendChild(el("span", "status-chip", `交过 ${doneTasks} 次作业`));
+  if (projects.length) status.appendChild(el("span", "status-chip", `${projects.length} 个项目`));
   wrap.appendChild(status);
+  const confirmed = facts.filter((f) => f.status === "confirmed" || f.status === "active").length;
+  const steps = [
+    { label: "聊过", done: !!talked, view: "dialogue" },
+    { label: "核对", done: !!talked && drafts === 0 && confirmed > 0, view: "confirm" },
+    { label: "方向", done: !!field, view: "cards" },
+    { label: "作业", done: doneTasks > 0, view: "workbench" },
+    { label: "项目", done: projects.length > 0, view: "projects" },
+    { label: "记录", done: confirmed > 0, view: "me" },
+  ];
+  wrap.appendChild(loopStrip(steps, steps.findIndex((s) => !s.done)));
   const card = el("div", "nba-card");
   card.appendChild(el("h3", "nba-title", esc(title)));
   card.appendChild(el("p", "nba-why", esc(why)));
@@ -3048,6 +3696,32 @@ async function renderToday() {
   card.appendChild(act);
   wrap.appendChild(card);
   $app.appendChild(wrap);
+  if ((talked && drafts === 0) || field) {
+    api("POST", "/api/nba", { uid: S.uid }).then((nba) => {
+      if (stale(seq) || !nba || !nba.title || !nba.rationale) return;
+      card.querySelector(".nba-title").textContent = nba.title;
+      card.querySelector(".nba-why").textContent = nba.rationale;
+      const hit = NBA_ACTION_VIEW[nba.action] || NBA_ACTION_VIEW.micro_task;
+      go.textContent = hit[0];
+      go.onclick = () => setView(hit[1]);
+      (nba.rationale_facts || []).slice(0, 2).forEach((fid) => {
+        const f = facts.find((x) => x.id === fid);
+        if (f && f.value) card.insertBefore(el("p", "nba-evidence", `你说过的：「${esc(f.value)}」`), act);
+      });
+      const alts = (nba.alternatives || []).slice(0, 2);
+      if (alts.length && !card.querySelector(".nba-alts")) {
+        const altRow = el("div", "nba-alts");
+        alts.forEach((a) => {
+          const to = NBA_ACTION_VIEW[a.action];
+          const b = el("button", "btn small ghost", esc(a.title || a.action));
+          b.type = "button";
+          if (to) b.onclick = () => setView(to[1]);
+          altRow.appendChild(b);
+        });
+        card.appendChild(altRow);
+      }
+    }).catch(() => { /* 保持本地建议 */ });
+  }
   // 每日情报：开过研读、或方向正好有工具包时出现；单独加载，arXiv 慢也不挡上面的主建议
   if (S.kitId || saved.code === "ai") {
     if (!S.kitId) useKit(DEFAULT_KIT);
@@ -3088,23 +3762,38 @@ async function renderRead() {
   if (!S.kitId) useKit(DEFAULT_KIT);
   const kitId = S.kitId;
   const tab = S.readTab || "kit";
-  let kit; let cards;
+  let kit; let cards = { cards: [] };
   try {
-    [kit, cards] = await Promise.all([
-      api("GET", `/api/kits/${kitId}`),
-      api("GET", `/api/cards?uid=${S.uid}&kit=${kitId}`),
-    ]);
+    kit = await api("GET", `/api/kits/${kitId}`);
   } catch (e) {
     if (stale(seq)) return;
+    if (await recoverUser(e)) return;
     $app.innerHTML = "";
     $app.appendChild(workspaceHead("研读"));
     $app.appendChild(el("div", "note-box", `工具包加载失败：${esc(e.message)}`));
     return;
   }
+  if (!S.uid) {
+    if (stale(seq)) return;
+    $app.innerHTML = "";
+    $app.appendChild(workspaceHead("研读"));
+    $app.appendChild(el("div", "note-box", "先进入启研，再看你的阅读卡。工具包本身可以稍后打开。"));
+    return;
+  }
+  try {
+    cards = await api("GET", `/api/cards?uid=${S.uid}&kit=${kitId}`);
+  } catch (e) {
+    if (stale(seq)) return;
+    if (await recoverUser(e)) return;
+    $app.innerHTML = "";
+    $app.appendChild(workspaceHead("研读"));
+    $app.appendChild(el("div", "note-box", `阅读卡没取到：${esc(e.message)}`));
+    return;
+  }
   if (stale(seq)) return;
   const byPaper = Object.fromEntries((cards.cards || []).map((c) => [c.arxiv_id, c]));
   $app.innerHTML = "";
-  $app.appendChild(workspaceHead("研读", "读懂一个小领域：每篇论文一张阅读卡，引文必须能在原文里逐字找到；三张卡过线后，矩阵会把缺口摆出来。"));
+  $app.appendChild(workspaceHead("研读", "先读一篇能打开的论文。记下原句，再写你怎么看。别从综述大海捞针。"));
   const passed = Object.values(byPaper).filter((c) => c.status === "pass").length;
   $app.appendChild(el("div", "ws-status", `<span>工具包「${esc(kit.name)}」v${esc(kit.version)}</span><span>过线阅读卡 ${passed} 张</span><span>${esc(kit.status)}</span>`));
   $app.appendChild(readTabs(tab));
@@ -3239,15 +3928,16 @@ async function renderCard() {
   $app.appendChild(back);
   const loading = el("div", "note-box", "正在取原文（arXiv HTML 版，第一次稍慢）…");
   $app.appendChild(loading);
-  let kit; let paper; let cards;
+  let kit; let paper; let cards = { cards: [] };
   try {
-    [kit, paper, cards] = await Promise.all([
+    [kit, paper] = await Promise.all([
       api("GET", `/api/kits/${kitId}`),
       api("GET", `/api/papers/${aid}`),
-      api("GET", `/api/cards?uid=${S.uid}&kit=${kitId}`),
     ]);
+    if (S.uid) cards = await api("GET", `/api/cards?uid=${S.uid}&kit=${kitId}`);
   } catch (e) {
     if (stale(seq)) return;
+    if (await recoverUser(e)) return;
     loading.textContent = `原文取不到（如实说明）：${e.message}。可以先在 arXiv 上读：https://arxiv.org/abs/${aid}`;
     return;
   }
@@ -3514,7 +4204,7 @@ async function renderPosition() {
   if (!S.kitId) useKit(DEFAULT_KIT);
   const tab = S.posTab || "edges";
   $app.innerHTML = "";
-  $app.appendChild(workspaceHead("定位", "会的人越来越多，学得越来越快。这里帮你看清三件事：你有什么别人不容易有的、哪里还没挤满、怎么用一句有证据的话说出「为什么是我」。"));
+  $app.appendChild(workspaceHead("定位", "选组、写申请之前，先列出别人不容易有、又能核对的那几条。别写「热爱科研」。"));
   $app.appendChild(positionTabs(tab));
   const body = el("div");
   $app.appendChild(body);
@@ -3525,7 +4215,9 @@ async function renderPosition() {
     else if (tab === "bets") await paintBets(seq, body);
     else await paintEdges(seq, body);
   } catch (e) {
-    if (!stale(seq)) body.appendChild(el("div", "note-box", `加载失败：${esc(e.message)}`));
+    if (stale(seq)) return;
+    if (await recoverUser(e)) return;
+    body.appendChild(el("div", "note-box", `加载失败：${esc(e.message)}`));
   }
 }
 
@@ -3833,7 +4525,8 @@ async function paintStatement(seq, body) {
 }
 
 async function paintBets(seq, body) {
-  const [b, kit] = await Promise.all([api("GET", `/api/bets?uid=${S.uid}`), api("GET", `/api/kits/${S.kitId}`)]);
+  const kit = await api("GET", `/api/kits/${S.kitId}`);
+  const b = await api("GET", `/api/bets?uid=${S.uid}`);
   if (stale(seq)) return;
   const panel = el("div", "panel");
   panel.appendChild(el("p", "panel-sub", `同时最多 ${b.max} 个目标，每个标「冲 / 稳 / 保」。申请像投资组合：全押一处风险太集中。有限也是信号——「这是我这学期联系的三个组之一」比群发可信。`));
@@ -3905,7 +4598,7 @@ async function renderMe() {
   if (stale(seq)) return;
   const facts = r.facts.filter((f) => f.status !== "deleted" && f.status !== "dismissed");
   $app.innerHTML = "";
-  $app.appendChild(workspaceHead("记录", "它记住的每一条都写着来源。说得不对可以改，不想让它记着可以删。"));
+  $app.appendChild(workspaceHead("记录", "每条都写着从哪来。不对就改，不想留着就删。"));
   $app.appendChild(accountPanel());
   const main = el("div", "panel");
 
@@ -3940,6 +4633,11 @@ const STAGES = [
   { value: 3, label: "做过项目", hint: "交过一个完整的练手项目" },
 ];
 
+const SRC_KIND_CN = {
+  competition: "竞赛", open_source: "开源", open_problem: "公开题", dataset: "公开数据",
+  course_project: "课程大作业", innovation_program: "创新项目",
+};
+
 const STATUS_CN = { pass: "做到", partial: "部分做到", fail: "还没做到" };
 const STATUS_MARK = { pass: "✓", partial: "~", fail: "!" };
 
@@ -3962,7 +4660,7 @@ function downloadBlob(blob, name) {
 
 function projectTabs(active, mineCount) {
   const nav = el("nav", "ws-tabs");
-  [["find", "找项目"], ["mine", mineCount ? `我的项目 · ${mineCount}` : "我的项目"]].forEach(([key, label]) => {
+  [["find", "找项目"], ["sources", "来源"], ["mine", mineCount ? `我的项目 · ${mineCount}` : "我的项目"]].forEach(([key, label]) => {
     const b = el("button", `ws-tab${key === active ? " on" : ""}`, label);
     b.type = "button";
     b.onclick = () => { S.projectTab = key; setView("projects"); };
@@ -3982,9 +4680,10 @@ async function renderProjects() {
   if (stale(seq)) return;
   const tab = S.projectTab || "find";
   $app.innerHTML = "";
-  $app.appendChild(workspaceHead("项目", "学完一块之后，找一个有公开来源的真项目练手。成果打成一个压缩包交上来，按五条标准看它像不像这个项目要的东西。"));
+  $app.appendChild(workspaceHead("项目", "课堂作业练一个点。这里找一个公开真题，把点连起来，交一个压缩包。"));
   $app.appendChild(projectTabs(tab, (mine.projects || []).length));
   if (tab === "mine") { renderMine(mine.projects || []); return; }
+  if (tab === "sources") { renderSources(); return; }
 
   const t = trail();
   const field = activeField(t);
@@ -4183,10 +4882,62 @@ function projectCard(p) {
   return card;
 }
 
+async function renderSources() {
+  const seq = S.renderSeq;
+  let reg = null;
+  try {
+    reg = await api("GET", "/api/projects/sources");
+  } catch (e) {
+    if (stale(seq)) return;
+    $app.appendChild(el("div", "note-box", `来源清单读取失败（如实说明）：${esc(e.message)}`));
+    return;
+  }
+  if (stale(seq)) return;
+  const trailCode = trail().code;
+  const list = reg.sources || [];
+  const dirName = (code) => (FIELD_TREES[code] && FIELD_TREES[code].name) || code;
+  const stageLabel = (v) => { const st = STAGES.find((s) => s.value === v); return st ? st.label : ""; };
+  const inCurrent = (s) => (s.directions || []).includes(trailCode);
+  const sorted = [...list].sort((a, b) => Number(inCurrent(b)) - Number(inCurrent(a)));
+  const intro = el("p", "panel-sub sources-intro",
+    `「找项目」背后的全部来源，共 ${list.length} 个，每条都由人工实际访问核对过（${fmtTime(reg.generated_at)}）。` +
+    `其中一部分能实时检索，在「找项目」里直接出结果；其余按「怎么找」的路线自己去看。查不到就如实说查不到。`);
+  $app.appendChild(intro);
+  const grid = el("div", "src-grid");
+  sorted.forEach((s) => {
+    const card = el("article", "panel src-card");
+    const top = el("div", "src-top");
+    top.appendChild(el("h3", "src-name",
+      s.home_url ? `<a href="${esc(s.home_url)}" target="_blank" rel="noopener">${esc(s.name)} ↗</a>` : esc(s.name)));
+    if (s.kind && SRC_KIND_CN[s.kind]) top.appendChild(el("span", "kind-badge", SRC_KIND_CN[s.kind]));
+    card.appendChild(top);
+    if ((s.directions || []).length) {
+      const chips = el("div", "src-chips-row");
+      s.directions.forEach((c) => chips.appendChild(el("span", "mini-chip" + (c === trailCode ? " on" : ""), esc(dirName(c)))));
+      card.appendChild(chips);
+    }
+    if ((s.stage_fit || []).length) {
+      card.appendChild(el("p", "src-meta", `适合：${s.stage_fit.map((v) => stageLabel(v)).filter(Boolean).join(" / ")}`));
+    }
+    if (s.cadence) card.appendChild(el("p", "src-cadence", esc(s.cadence)));
+    if (s.manual_route) card.appendChild(el("p", "route-how clamp", `怎么找：${esc(s.manual_route)}`));
+    if ((s.search_terms || []).length) {
+      card.appendChild(el("p", "route-terms", "搜：" + s.search_terms.slice(0, 4).map((t) => `<code>${esc(t)}</code>`).join(" ")));
+    }
+    grid.appendChild(card);
+  });
+  $app.appendChild(grid);
+}
+
 function renderMine(list) {
   const panel = el("div", "panel");
   if (!list.length) {
     panel.appendChild(el("p", "panel-sub", "还没有选定项目。在「找项目」里挑一个「就练这个」。"));
+    const go = el("button", "btn ghost", "去找项目");
+    go.type = "button";
+    go.style.marginTop = "16px";
+    go.onclick = () => { S.projectTab = "find"; setView("projects"); };
+    panel.appendChild(go);
     $app.appendChild(panel);
     return;
   }
@@ -4325,6 +5076,13 @@ function paintReview(box, r, old, prev) {
   head.appendChild(hl);
   head.appendChild(el("div", "score-ring", `<span class="num">${r.passed}</span>/ ${r.total} 条做到`));
   sec.appendChild(head);
+  if ((r.criteria || []).length) {
+    const bar = el("div", "pass-bar");
+    (r.criteria || []).forEach((c) => {
+      bar.appendChild(el("i", c.status === "pass" ? "ok" : c.status === "partial" ? "part" : "bad"));
+    });
+    sec.appendChild(bar);
+  }
   const list = el("div", "rubric-list");
   (r.criteria || []).forEach((c) => {
     const ev = (c.evidence || []).filter((e) => e.file)
@@ -4435,11 +5193,25 @@ window.addEventListener("storage", (e) => {
 document.querySelectorAll(".nav-btn").forEach((b) => {
   b.addEventListener("click", () => {
     if (!S.uid) return;
-    if (b.dataset.workspace === "portrait") setView(S.portraitTab || "dialogue");
-    else setView(b.dataset.view);
+    setView(b.dataset.view);
   });
 });
 document.getElementById("brandHome").addEventListener("click", () => setView("home"));
+document.getElementById("dirChip").addEventListener("click", () => {
+  if (!S.uid) return;
+  setView("cards");
+});
+document.getElementById("userMenuBtn").addEventListener("click", (e) => {
+  e.stopPropagation();
+  if (!S.uid) return;
+  openUserMenu();
+});
+document.addEventListener("click", (e) => {
+  const menu = document.getElementById("userMenu");
+  if (!menu) return;
+  if (menu.contains(e.target) || e.target.closest("#userMenuBtn")) return;
+  closeUserMenu();
+});
 
 (async function boot() {
   const t0 = performance.now();
@@ -4474,6 +5246,10 @@ document.getElementById("brandHome").addEventListener("click", () => setView("ho
         setTimeout(() => toast("暂时连不上服务器，稍后刷新一下"), 800);
       }
     }
+  } else if (S.uid) {
+    // 只有 uid、认领没成（网络错误）：先去登录页，但 uid 留着，下次打开再认领——它是这个人唯一的凭证
+    S.resume = "login";
+    setTimeout(() => toast("暂时连不上服务器，稍后刷新一下"), 800);
   }
   let next = "home", note = "";
   try {

@@ -33,12 +33,25 @@ USER_DELETED = "user deleted"  # 触发器拒绝写入时的错误信息；main 
 
 
 def ephemeral() -> bool:
-    """库放在会被清掉的地方：/tmp 下，或者在函数计算上却没设 QIYAN_DB（默认路径在代码包里，实例回收就没了）。
-    只看路径，不碰磁盘。/api/health 把它报出来，线上一眼能看到。"""
-    path = str(DB_PATH)
-    if path.startswith(("/tmp/", "/private/tmp/")):
+    """库放在会被清掉的地方：/tmp 下；或者在函数计算上，没设 QIYAN_DB（默认路径在代码包里），
+    或者设了、那个目录却没挂盘（镜像自带的 /data 就是实例自己的盘，原来照样报「持久」，Codex 复现）。
+    /api/health 把它报出来，线上一眼能看到。函数计算上会看一眼挂载点（几次 stat）。"""
+    path = str(DB_PATH).replace("\\", "/")
+    if path.startswith("/tmp/") or path.startswith("/private/tmp/"):
         return True
-    return bool(os.environ.get("FC_FUNCTION_NAME")) and not os.environ.get("QIYAN_DB")
+    if not os.environ.get("FC_FUNCTION_NAME"):
+        return False
+    return not os.environ.get("QIYAN_DB") or not _own_mount(DB_PATH)
+
+
+def _own_mount(path: Path) -> bool:
+    """路径落在单独挂上来的盘（NAS、容器卷）上，不是实例自己的根盘：往上找第一个挂载点，是根目录就不算。"""
+    p = Path(os.path.abspath(path)).parent
+    while not os.path.ismount(p):
+        if p.parent == p:
+            return False
+        p = p.parent
+    return p != Path(p.anchor)
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS users (

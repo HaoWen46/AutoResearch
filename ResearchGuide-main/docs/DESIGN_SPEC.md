@@ -65,7 +65,7 @@
 | 任务 | `.task-head` + `.step-list` + `.criteria` + `.submit-box` | 步骤是可勾选的行，标准是圆点列表 |
 | 反馈 | `.feedback` + `.rubric-item.pass/.fail` + `.why-box` | 分数写成「3 / 3 条做到」；下一步只指一处 |
 | 建议卡 | `.nba-card` | 今日唯一重点 |
-| 首页 | `.land` + `.snap` + `.land-points` + `.fella-index` | 点线图用 Canvas 2D 绘制，见 `app.js` 的 `SKETCHES` |
+| 首页 | `.land` + `.snap-inner` + `.land-steps` + `.land-skip` | 每屏一色的发光粒子（`TONES` / `FIG_ANIMS`），左右对调，钉住文字淡入 |
 
 **事实类别色**：background 蓝 · interest 主色 · capability 金 · preference 紫 · experience 珊瑚（只用作圆点）。
 

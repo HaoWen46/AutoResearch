@@ -4191,8 +4191,10 @@ async function dailyBlock(seq) {
         const n = box.querySelector(".daily-head .num");
         // 几行同时交时回来的顺序不定：同一天里只往大里改，旧的那个数不能把新的盖小；
         // 过了零点就照新一天的数来（原来一律取大，跨天还显示昨天的 5/3，Codex 复现）
-        if (n && r && typeof r.done_today === "number") {
-          const sameDay = r.day && r.day === box.dataset.day;
+        // 跨零点倒着回来的那种：比现在显示的日期早的回包不用（原来昨天的 6 盖掉了今天的 1，Codex 复现）
+        const shownDay = box.dataset.day || "";
+        if (n && r && typeof r.done_today === "number" && !(r.day && shownDay && r.day < shownDay)) {
+          const sameDay = r.day && r.day === shownDay;
           n.textContent = String(sameDay ? Math.max(Number(n.textContent) || 0, r.done_today) : r.done_today);
           if (r.day) box.dataset.day = r.day;
         }

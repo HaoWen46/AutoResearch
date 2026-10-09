@@ -331,7 +331,9 @@ def _as_int(v: Any, default: int, lo: int, hi: int) -> int:
     """模型给的数字：20、20.0、"20"、"20分钟"、"约 20-30 分钟" 都取第一个数；取不到用默认值。"""
     if isinstance(v, bool):
         return default
-    if isinstance(v, (int, float)) and math.isfinite(v):
+    if isinstance(v, int):
+        n = v
+    elif isinstance(v, float) and math.isfinite(v):
         n = int(v)
     else:
         m = re.search(r"\d+", str(v or ""))
@@ -470,8 +472,9 @@ def _llm_feedback(task: MicroTask, payload: str) -> dict[str, Any] | None:
             "comment": str(item.get("comment") or "已阅读。")[:80],
         })
     raw = data.get("score")
-    # 分数先查是有限数且在 0–100 再取整：原来 1e309 读成 inf，int(inf) 抛 OverflowError，提交接口 500（Codex 复现）
-    if isinstance(raw, bool) or not isinstance(raw, (int, float)) or not math.isfinite(raw) or not 0 <= raw <= 100:
+    # 分数先查是有限数且在 0–100 再取整：原来 1e309 读成 inf，int(inf) 抛 OverflowError，提交接口 500（Codex 复现）。
+    # 先比范围再查有限：10**309 这样的大整数进 math.isfinite 也会溢出
+    if isinstance(raw, bool) or not isinstance(raw, (int, float)) or not 0 <= raw <= 100 or not math.isfinite(raw):
         return None
     score = int(raw)
     return {

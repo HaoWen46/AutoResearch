@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import json
+from typing import Any
 import os
 import time
 import urllib.error
@@ -176,7 +177,7 @@ def chat(system: str, user: str, *, temperature: float = 0.4, timeout: int = 25,
         if not isinstance(message, dict) or not isinstance(content, (str, type(None))):
             err = "bad payload"
         else:
-            text = (content or "").strip() or None
+            text = _clean_text((content or "").strip()) or None
     usage = data.get("usage") if isinstance(data, dict) else None
     usage = usage if isinstance(usage, dict) else {}  # usage 是列表时原来读 token 数就抛异常（Codex 复现）
     print(json.dumps({
@@ -184,6 +185,21 @@ def chat(system: str, user: str, *, temperature: float = 0.4, timeout: int = 25,
         "tokens": usage.get("total_tokens"), "error": err or None,
     }, ensure_ascii=False))
     return text
+
+
+def _clean_text(s: str) -> str:
+    """去掉落单的代理字符（JSON 里的 \\ud800 这类）：它们写不进 SQLite，原来先存了事实、到存回复时才报错（Codex 复现）。"""
+    return s.encode("utf-8", "replace").decode("utf-8") if any("\ud800" <= c <= "\udfff" for c in s) else s
+
+
+def _clean(obj: Any) -> Any:
+    if isinstance(obj, str):
+        return _clean_text(obj)
+    if isinstance(obj, list):
+        return [_clean(x) for x in obj]
+    if isinstance(obj, dict):
+        return {(_clean_text(k) if isinstance(k, str) else k): _clean(v) for k, v in obj.items()}
+    return obj
 
 
 def chat_json(system: str, user: str, *, timeout: int = 30, tag: str = "json") -> dict | None:
@@ -201,9 +217,9 @@ def chat_json(system: str, user: str, *, timeout: int = 30, tag: str = "json") -
         return None
     try:
         data = json.loads(cleaned[start:end + 1])
-    except json.JSONDecodeError:
+    except (json.JSONDecodeError, RecursionError):
         return None
-    return data if isinstance(data, dict) else None
+    return _clean(data) if isinstance(data, dict) else None
 
 
 def chat_stream(system: str, user: str, *, temperature: float = 0.6, timeout: int = 60,
@@ -251,7 +267,7 @@ def chat_stream(system: str, user: str, *, temperature: float = 0.6, timeout: in
                 continue
             body = line[5:].strip()
             if body == "[DONE]":
-                if status is not None:
+                if status is not None and not status.get("cut"):
                     status["finished"] = True  # 原来断在半个 JSON / 半个汉字上，调用方也把半截当成功回复（Codex 复现）
                 break
             try:
@@ -261,13 +277,17 @@ def chat_stream(system: str, user: str, *, temperature: float = 0.6, timeout: in
             # 块的形状逐层核对，不对就跳过：原来 choices 不是列表、delta 不是对象会抛异常，content 是列表会原样交出去（Codex 复现）
             choices = chunk.get("choices") if isinstance(chunk, dict) else None
             choice = choices[0] if isinstance(choices, list) and choices and isinstance(choices[0], dict) else {}
-            if choice.get("finish_reason") and status is not None:
-                status["finished"] = True
+            reason = choice.get("finish_reason")
+            if reason and status is not None:
+                # 只有 stop 是说完了；length（到了字数上限）、content_filter 这些都是半截：原来一律当正常收尾，半截覆盖了完整回复（Codex 复现）
+                status["finished"] = reason == "stop" and not status.get("cut")
+                if reason != "stop":
+                    status["cut"] = str(reason)[:40]
             delta = choice.get("delta")
             piece = delta.get("content") if isinstance(delta, dict) else None
             if piece and isinstance(piece, str):
                 pieces += 1
-                yield piece
+                yield _clean_text(piece)
     except urllib.error.HTTPError as exc:
         err = f"http {exc.code}"
     except ReadLimitError as exc:

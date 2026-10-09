@@ -507,9 +507,10 @@ def _llm_review(bundle: dict[str, Any], checks: dict[str, Any], project: dict[st
         ev = []
         raw_ev = it.get("evidence")
         for e in raw_ev if isinstance(raw_ev, list) else []:
-            if not isinstance(e, dict) or not isinstance(e.get("file"), str):
+            # 引文类型不对（列表、数字）就整条不要：原来当成空引文，只要文件在就算证据，承认没做完的项目也拿了 5/5（Codex 复现）
+            if not isinstance(e, dict) or not isinstance(e.get("file"), str) or not isinstance(e.get("quote"), (str, type(None))):
                 continue
-            f, q = e["file"], (e.get("quote") if isinstance(e.get("quote"), str) else "").strip()
+            f, q = e["file"], (e.get("quote") or "").strip()
             # 文件必须真在压缩包里；写了引文就必须真在那个文件里。原来不存在的文件配空引文也算证据（Codex 复现）
             if f in paths and (not q or q in bundle["texts"].get(f, "")):
                 ev.append({"file": f, "quote": q[:60]})

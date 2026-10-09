@@ -9,6 +9,7 @@
 """
 from __future__ import annotations
 
+import math
 import re
 from datetime import datetime, timedelta, timezone
 from typing import Any, NamedTuple
@@ -422,31 +423,97 @@ def support_ratio(value: str, quote: str) -> float:
     return len(v & _content_chars(quote)) / len(v)
 
 
-# 年级的说法：「大二」「本科二年级」是同一个（本科, 2）；「博士」是（博士, 不知第几年）。
+# 年级的说法：「大二」「本科二年级」「sophomore」是同一个（本科, 2）；「博士」是（博士, 不知第几年）。
 _GRADE_RE = re.compile(r"(本科|硕士|研究生|博士|高中)?(?:([大研硕博高])([一二三四五六1-6])|([一二三四五六1-6])年级)"
                        r"|(本科|硕士|研究生|博士|高中)")
 _GRADE_STAGE = {"本科": "本", "大": "本", "硕士": "硕", "研究生": "硕", "研": "硕", "硕": "硕",
                 "博士": "博", "博": "博", "高中": "高", "高": "高"}
 _GRADE_YEAR = {c: i + 1 for i, c in enumerate("一二三四五六")} | {str(i): i for i in range(1, 7)}
+_GRADE_EN = {"freshman": ("本", 1), "sophomore": ("本", 2), "junior": ("本", 3), "senior": ("本", 4),
+             "undergrad": ("本", None), "undergraduate": ("本", None), "master": ("硕", None),
+             "masters": ("硕", None), "phd": ("博", None)}
+_NEGATED = re.compile(r"(?:不是|不再是|并非|非|没在|不在)\s*$")
 
 
 def _grades_in(text: str) -> list[tuple[str | None, int | None]]:
+    """文本里提到的年级（阶段, 第几年）。前面紧跟「不是」的不算：「我不是大二，我是研一」只有研一。"""
+    text = text or ""
     out = []
-    for m in _GRADE_RE.finditer(text or ""):
+    for m in _GRADE_RE.finditer(text):
+        if _NEGATED.search(text[max(0, m.start() - 4):m.start()]):
+            continue
         word, prefix, year, year2, alone = m.groups()
         stage = _GRADE_STAGE.get(word or prefix or alone or "")
         out.append((stage, _GRADE_YEAR.get(year or year2 or "")))
+    for m in re.finditer(r"[a-z']+", text.lower()):
+        hit = _GRADE_EN.get(m.group().replace("'", ""))
+        if hit and not _NEGATED.search(text[max(0, m.start() - 4):m.start()]) and not re.search(r"\bnot\s+(?:a\s+)?$", text.lower()[:m.start()]):
+            out.append(hit)
     return out
 
 
+# 常见缩写和全称算同一个：学生说「想试试 AI」，模型记「人工智能」不算编
+_ALIASES = {"ai": "人工智能", "ml": "机器学习", "nlp": "自然语言处理", "cv": "计算机视觉", "cs": "计算机",
+            "rl": "强化学习", "dl": "深度学习", "llm": "大模型", "hci": "人机交互", "econ": "经济学"}
+
+
+def _with_aliases(text: str) -> str:
+    low = (text or "").lower()
+    extra = [full for a, full in _ALIASES.items() if re.search(rf"(?<![a-z]){a}(?![a-z])", low)]
+    extra += [a for a, full in _ALIASES.items() if full in low]
+    return low + " " + " ".join(extra)
+
+
+_CN_DIGIT = {"零": 0, "一": 1, "二": 2, "两": 2, "三": 3, "四": 4, "五": 5, "六": 6, "七": 7, "八": 8, "九": 9}
+
+
+def _cn_number(run: str) -> int | None:
+    """「二十」「二十五」「十二」「三」「一百」这类小于一千的中文数；认不出返回 None。"""
+    total, cur = 0, 0
+    for ch in run:
+        if ch in _CN_DIGIT:
+            cur = _CN_DIGIT[ch]
+        elif ch == "十":
+            total += (cur or 1) * 10
+            cur = 0
+        elif ch == "百":
+            total += (cur or 1) * 100
+            cur = 0
+        else:
+            return None
+    return total + cur
+
+
+def _numbers_in(text: str, chinese: bool) -> set[int]:
+    out = {int(d) for d in re.findall(r"\d{1,9}", text or "")}
+    if chinese:
+        out |= {n for run in re.findall(r"[零一二两三四五六七八九十百]+", text or "") if (n := _cn_number(run)) is not None}
+    return out
+
+
+def _numbers_supported(value: str, quote: str) -> bool:
+    """值里写的阿拉伯数字，引文里都得有（引文里的中文数也算）：原来「每周2小时」撑得住「每周20小时」（Codex 复现）。"""
+    want = _numbers_in(value, chinese=False)
+    return not want or want <= _numbers_in(quote, chinese=True)
+
+
 def _short_value_supported(key: str, value: str, quote: str) -> bool:
-    """短值也得撑得住：年级按（阶段, 第几年）比；别的短值至少要有一个内容字出现在引文里。"""
+    """短值也得撑得住。年级按（阶段, 第几年）比：值写了第几年，引文就得说了同一年（「本科在读」撑不住「本科二年级」），
+    被否定的不算；别的短值（算上常见缩写）至少要有一个内容字出现在引文里。"""
     if key == "grade" and _grades_in(value):
         stage, year = _grades_in(value)[0]
-        return any((stage is None or s is None or s == stage) and (year is None or y is None or y == year)
+        return any((stage is None or s is None or s == stage) and (year is None or y == year)
                    for s, y in _grades_in(quote))
-    v = _content_chars(value.lower())
-    return not v or bool(v & _content_chars(quote.lower()))
+    v = _content_chars(_with_aliases(value))
+    return not v or bool(v & _content_chars(_with_aliases(quote)))
+
+
+# 学生只回了一句确认（「前者」「第二个」「对」「好的」）：这句话本身撑不住任何值，它确认的是助手上一句给的选项。
+# 对话那边把这种回答和助手上一句拼成一条证据（dialogue._evidence_pool），这里认它。
+CONFIRM_RE = re.compile(r"^\s*(?:我选|选|就|要)?\s*(?:前者|后者|前一个|后一个|第[一二三四五六七八九十1-9]\s*(?:个|种|项|条|个吧)?|[1-9]|[A-Fa-f]"
+                        r"|这个|那个|就这个|都要|都行|是的?|对的?|嗯+|好的?|好啊|没错|可以|行|ok|okay|yes)\s*[。！!.,，~～吧呀啊]*\s*$",
+                        re.IGNORECASE)
+CONFIRM_SEP = " ⟪确认助手上一句⟫ "
 
 
 # 这条记忆改变未来的哪个决策。填不出就没资格进画像。
@@ -484,6 +551,12 @@ def validate_ops(uid: str, ops: list[dict[str, Any]], evidence_pool: list[str]) 
         if not isinstance(raw, dict):
             rejected.append({"op": None, "reason": "not_an_object"})
             continue
+        # 值是数字（入学年份 2024、年龄 20）先转成字符串：原来一律当类型不对拒掉，年份就记不下来（Codex 复现）
+        num = raw.get("value")
+        if isinstance(num, int) and not isinstance(num, bool) and abs(num) < 10 ** 12:
+            raw = {**raw, "value": str(num)}
+        elif isinstance(num, float) and math.isfinite(num) and abs(num) < 1e12:
+            raw = {**raw, "value": f"{num:g}"}
         # 字段只收字符串（或不填）：原来 key 是列表就 .strip() 抛异常、整轮 500，valid_until 是 [] / {} 过了校验到 SQLite 才炸（Codex 复现）
         bad = next((f for f in _OP_FIELDS if not isinstance(raw.get(f), (str, type(None)))), None)
         if bad:
@@ -557,6 +630,9 @@ def validate_ops(uid: str, ops: list[dict[str, Any]], evidence_pool: list[str]) 
 
         # 闸门②：引文得撑得住这个值。
         quote = str(raw.get("evidence_quote") or "").strip()
+        if CONFIRM_RE.match(quote):
+            # 引的是一句确认：拿它连同被确认的那句助手的话一起来撑（只有对话那边拼过的才有）
+            quote = next((t for t in evidence_pool if CONFIRM_SEP in t and t.startswith(quote)), quote)
         substantive = len(_content_chars(value)) >= _SUPPORT_MIN_CHARS
         ratio = support_ratio(value, quote) if (op in ("add", "replace") and substantive) else 1.0
         if op in ("add", "replace") and substantive and ratio < _SUPPORT_FLOOR:
@@ -565,6 +641,9 @@ def validate_ops(uid: str, ops: list[dict[str, Any]], evidence_pool: list[str]) 
         if op in ("add", "replace") and not substantive and not _short_value_supported(key, value, quote):
             # 短值原来跳过支撑度检查：学生说「我大二」，模型写年级「博士」也照样按 declared 存进去（Codex 复现）
             rejected.append({**item, "reason": "short_value_not_in_evidence"})
+            continue
+        if op in ("add", "replace") and key != "grade" and not _numbers_supported(value, quote):
+            rejected.append({**item, "reason": "number_not_in_evidence"})
             continue
 
         valid_until = raw.get("valid_until")

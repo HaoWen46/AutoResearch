@@ -246,3 +246,40 @@ def test_an_early_stop_followed_by_more_text_is_not_finished(monkeypatch, tail):
     with budget.unmetered():
         list(llm.chat_stream("s", "u", status=status))
     assert not status.get("finished")
+
+
+@pytest.mark.parametrize("value,quote,ok", [
+    ("大三", "我大二，学 Python 三年了", False),             # 学了几年不是年级
+    ("大二", "我不是大二，我已经学了二年编程", False),
+    ("大四", "二零二四年入学，现在大二", False),
+    ("大一", "本科在读，计划一年内读完这本书", False),
+    ("大二", "我去年读大二，现在已经大三了", False),          # 过去的
+    ("大三", "我去年读大二，现在已经大三了", True),
+    ("大二", "大二，哦打错了我是大三", False),                # 改口
+    ("大三", "大二，哦打错了我是大三", True),
+    ("本科二年级", "second-year undergrad at PKU", True),
+    ("大二", "我现在是大 2，空格手滑", True),
+    ("本科三年级", "third year undergraduate", True),
+    ("本科二年级，GPA4.0", "我本科二年级", False),            # 年级里夹带没说过的 GPA
+])
+def test_grade_phrasings_round14(value, quote, ok):
+    """第十四轮 Codex 复现的年级说法：学了几年、计划、入学年份不是年级；过去的、改口的不算；英文和带空格的认得。"""
+    assert memory._short_value_supported("grade", value, quote) is ok
+
+
+@pytest.mark.parametrize("value,quote,ok", [
+    ("每周20小时", "我每周2小时，总共20周", False),   # 20 是周数
+    ("每周1.5小时", "每周90分钟", True),               # 换算
+    ("每周3至5小时", "每周三到五小时", True),           # 范围
+    ("GPA 3.7", "GPA：３．７", True),                  # 全角
+    ("高等数学A（1）", "高数A（一）", True),           # 课程序号
+    ("英语CET4", "大学英语四级", True),
+])
+def test_quantities_round14(value, quote, ok):
+    assert memory._numbers_supported(value, quote) is ok
+
+
+def test_a_negated_interest_is_not_an_interest():
+    """「我对机器学习没有兴趣」不能记成兴趣「机器学习」；「我不是不喜欢 AI」这种双重否定照样算（Codex 复现）。"""
+    assert not memory._short_value_supported("interest:ml", "机器学习", "我对机器学习没有兴趣")
+    assert memory._short_value_supported("interest:ai", "AI", "我不是不喜欢 AI，只是这次不想写模型")

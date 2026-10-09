@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import math
 import re
+import unicodedata
 from datetime import datetime, timedelta, timezone
 from typing import Any, NamedTuple
 
@@ -424,32 +425,43 @@ def support_ratio(value: str, quote: str) -> float:
 
 
 # 年级的说法：「大二」「本科二年级」「sophomore」是同一个（本科, 2）；「博士」是（博士, 不知第几年）。
-_GRADE_RE = re.compile(r"(本科|硕士|研究生|博士|高中|大学)?\s*(?:([大研硕博高])([一二三四五六1-6])|(?<![0-9])第?([一二三四五六1-6])\s*(?:年级|年(?![代份]))"
-                       r")|(本科|硕士|研究生|博士|高中)")
+_GRADE_RE = re.compile(r"(本科|硕士|研究生|博士|高中|大学)?\s*(?:([大研硕博高])\s*([一二三四五六1-6])(?![0-9])|第([一二三四五六1-6])\s*年(?![代份])"
+                       r"|(?<![0-9])([一二三四五六1-6])\s*年级)|(本科|硕士|研究生|博士|高中)")
 _GRADE_STAGE = {"本科": "本", "大学": "本", "大": "本", "硕士": "硕", "研究生": "硕", "研": "硕", "硕": "硕",
                 "博士": "博", "博": "博", "高中": "高", "高": "高"}
 _GRADE_YEAR = {c: i + 1 for i, c in enumerate("一二三四五六")} | {str(i): i for i in range(1, 7)}
 _GRADE_EN = {"freshman": ("本", 1), "sophomore": ("本", 2), "junior": ("本", 3), "senior": ("本", 4),
              "undergrad": ("本", None), "undergraduate": ("本", None), "master": ("硕", None),
              "masters": ("硕", None), "phd": ("博", None)}
-# 前面紧跟这些的年级不算现在的：否定（不是、不算）和过去（以前是、去年）。「以前是大一，现在大二」只有大二
-_NEGATED = re.compile(r"(?:不是|不再是|并非|非|没在|不在|不算|算不上|以前是|之前是|原来是|去年是|曾经是|以前|之前|原来|去年|曾经)\s*$")
+_EN_ORD = {"first": 1, "1st": 1, "second": 2, "2nd": 2, "third": 3, "3rd": 3, "fourth": 4, "4th": 4, "fifth": 5, "5th": 5}
+_EN_YEAR = re.compile(r"\b(first|second|third|fourth|fifth|[1-5](?:st|nd|rd|th))[\s-]*year\b|\byear\s*([1-6])\b")
+# 前面紧跟这些的年级不算现在的：否定（不是、不算）和过去（以前是、去年读）。「以前是大一，现在大二」只有大二
+_NEGATED = re.compile(r"(?:不是|不再是|并非|非|没在|不在|不算|算不上|(?:以前|之前|原来|去年|曾经|前年)(?:是|读|在读|上|念)?)\s*$")
+# 后面紧跟这些的是说错了、改口：「大二，哦打错了我是大三」只有大三
+_CORRECTED = re.compile(r"^[^。；;\n]{0,4}(?:打错|说错|写错|不对|错了|口误)")
 
 
 def _grades_in(text: str) -> list[tuple[str | None, int | None]]:
-    """文本里提到的年级（阶段, 第几年）。前面紧跟「不是」的不算：「我不是大二，我是研一」只有研一。"""
-    text = text or ""
+    """文本里提到的、说的是现在的年级（阶段, 第几年）。被否定的、过去的、紧接着改口的不算。
+    「第N年」要有「第」：「学 Python 三年了」「一年内读完」不是年级（Codex 第十四轮复现）。"""
+    text = unicodedata.normalize("NFKC", text or "")
     out = []
     for m in _GRADE_RE.finditer(text):
-        if _NEGATED.search(text[max(0, m.start() - 5):m.start()]):
+        if _NEGATED.search(text[max(0, m.start() - 6):m.start()]) or _CORRECTED.search(text[m.end():m.end() + 10]):
             continue
-        word, prefix, year, year2, alone = m.groups()
+        word, prefix, year, year2, year3, alone = m.groups()
         stage = _GRADE_STAGE.get(word or prefix or alone or "")
-        out.append((stage, _GRADE_YEAR.get(year or year2 or "")))
-    for m in re.finditer(r"[a-z']+", text.lower()):
+        out.append((stage, _GRADE_YEAR.get(year or year2 or year3 or "")))
+    low = text.lower()
+    for m in re.finditer(r"[a-z']+", low):
         hit = _GRADE_EN.get(m.group().replace("'", ""))
-        if hit and not _NEGATED.search(text[max(0, m.start() - 4):m.start()]) and not re.search(r"\bnot\s+(?:a\s+)?$", text.lower()[:m.start()]):
+        if hit and not re.search(r"\bnot\s+(?:a\s+|an\s+)?$", low[:m.start()]):
             out.append(hit)
+    undergrad = "undergrad" in low or "本科" in text
+    for m in _EN_YEAR.finditer(low):
+        n = _EN_ORD.get(m.group(1) or "") or (int(m.group(2)) if m.group(2) else None)
+        if n:
+            out.append(("本" if undergrad else None, n))
     return out
 
 
@@ -485,24 +497,75 @@ def _cn_number(run: str) -> int | None:
     return total + cur
 
 
-_UNIT = "小时分钟秒天周月年岁学分门个次篇项人倍%"
+# 数量连着单位比：「每周2小时，总共20周」撑不住「每周20小时」——20 在原话里是周数（Codex 第十四轮复现）
+_UNITS = {"小时": "h", "h": "h", "hr": "h", "hrs": "h", "hour": "h", "hours": "h", "个小时": "h", "钟头": "h",
+          "分钟": "min", "min": "min", "mins": "min", "分": "min", "秒": "s", "天": "d", "日": "d", "周": "w", "星期": "w",
+          "个月": "mo", "月": "mo", "年": "y", "岁": "age", "学分": "cr", "门": "n", "个": "n", "次": "n", "篇": "n",
+          "项": "n", "人": "n", "倍": "x", "%": "%", "级": "lv", "期": "n", "章": "n", "节": "n", "页": "n", "题": "n"}
+_UNIT_RE = "|".join(sorted(map(re.escape, _UNITS), key=len, reverse=True))
+_NUM = r"(\d{1,9}(?:\.\d{1,4})?|[零一二两三四五六七八九十百]+)"
+_QTY = re.compile(_NUM + r"(?:\s*(?:到|至|~|-|—|或)\s*" + _NUM + r")?\s*(" + _UNIT_RE + r")?", re.IGNORECASE)
 
 
-def _numbers_in(text: str) -> set[float]:
-    """文本里的数，按数值：「3.70」「3.7」是同一个；中文数只认后面跟着单位的（「两小时」「二十学分」），免得「一些」也成了 1。"""
-    text = text or ""
-    out = {float(d) for d in re.findall(r"\d{1,9}(?:\.\d{1,4})?", text)}
-    for m in re.finditer(r"([零一二两三四五六七八九十百]+)(?=\s*[" + _UNIT + r"])", text):
-        n = _cn_number(m.group(1))
-        if n is not None:
-            out.add(float(n))
+def _num(tok: str) -> float | None:
+    if tok[0].isdigit():
+        return float(tok)
+    n = _cn_number(tok)
+    return None if n is None else float(n)
+
+
+def _quantities(text: str) -> set[tuple[float, str]]:
+    """文本里的数和它的单位（没单位就是 ""）。全角先转半角（「３．７」）；中文数只认带单位或在括号里的（「高数A（一）」），
+    免得「一些」也成了 1；范围「三到五小时」两头都算小时。"""
+    text = unicodedata.normalize("NFKC", text or "")
+    out: set[tuple[float, str]] = set()
+    for m in _QTY.finditer(text):
+        a, b, unit = m.group(1), m.group(2), (m.group(3) or "")
+        u = _UNITS.get(unit.lower(), _UNITS.get(unit, "")) if unit else ""
+        bracketed = text[max(0, m.start() - 1):m.start()] in ("(", "（") and text[m.end():m.end() + 1] in (")", "）")
+        for tok in (a, b):
+            if not tok:
+                continue
+            if not tok[0].isdigit() and not u and not bracketed:
+                continue
+            n = _num(tok)
+            if n is not None:
+                out.add((n, u))
     return out
 
 
+def _numbers_in(text: str) -> set[float]:
+    return {n for n, _ in _quantities(text)}
+
+
 def _numbers_supported(value: str, quote: str) -> bool:
-    """值里写的数，引文里都得有同一个数：原来「每周2小时」撑得住「每周20小时」、「3.07」撑得住「3.7」（Codex 复现）。"""
-    want = _numbers_in(value)
-    return not want or want <= _numbers_in(quote)
+    """值里写的每个数，引文里都得有同一个数、而且单位对得上（值没写单位就只比数）；小时和分钟可以互换。
+    原来「每周2小时」撑得住「每周20小时」、「3.07」撑得住「3.7」（Codex 复现）。"""
+    have = _quantities(quote)
+    for n, u in _quantities(value):
+        same = {(n, u)} if u else {(n, x) for _, x in have}
+        if u == "h":
+            same.add((round(n * 60, 4), "min"))
+        if u == "min":
+            same.add((round(n / 60, 4), "h"))
+        if not (same & have or (u and (n, "") in have)):
+            return False
+    return True
+
+
+_POSITIVE_KEYS = ("interest", "goal", "direction", "field")
+_NEG_BEFORE = r"(?<!不是)(?<!并非)(?:不喜欢|讨厌|不想学|不想做|不想读|不想碰|不打算|不考虑|不感兴趣于|对)\s*"
+_NEG_AFTER = r"\s*(?:没有?|不|并不|不太|没什么)(?:什么|太)?(?:兴趣|感兴趣|想法|打算)"
+
+
+def _negated_in(value: str, quote: str) -> bool:
+    """引文里这个值是被否定的：「对 X 没有兴趣」「不喜欢 X」（「我不是不喜欢 X」这种双重否定不算）。"""
+    low = quote.lower()
+    for term in {value.lower(), *(a for a, full in _ALIASES.items() if full == value), *(full for a, full in _ALIASES.items() if a == value.lower())}:
+        t = re.escape(term)
+        if re.search(r"对\s*" + t + _NEG_AFTER, low) or re.search(r"(?<!不是)(?<!并非)(?:不喜欢|讨厌|不想学|不想做|不想读|不打算|不考虑)\s*" + t, low):
+            return True
+    return False
 
 
 def _short_value_supported(key: str, value: str, quote: str) -> bool:
@@ -510,8 +573,14 @@ def _short_value_supported(key: str, value: str, quote: str) -> bool:
     被否定的不算；别的短值（算上常见缩写）至少要有一个内容字出现在引文里。"""
     if key == "grade" and _grades_in(value):
         stage, year = _grades_in(value)[0]
+        rest = _GRADE_RE.sub("", unicodedata.normalize("NFKC", value))
+        # 年级后面夹带的别的内容（「本科二年级，GPA4.0」）也得在原话里有着落，不能借年级跳过（Codex 复现）
+        if _content_chars(rest) and not (_numbers_supported(rest, quote) and _content_chars(rest) & _content_chars(_with_aliases(quote))):
+            return False
         return any((stage is None or s is None or s == stage) and (year is None or y == year)
                    for s, y in _grades_in(quote))
+    if key.split(":")[0] in _POSITIVE_KEYS and _negated_in(value, quote):
+        return False  # 「我对机器学习没有兴趣」不能记成兴趣「机器学习」（Codex 复现）
     v = _content_chars(_with_aliases(value))
     return not v or bool(v & _content_chars(_with_aliases(quote)))
 

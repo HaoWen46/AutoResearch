@@ -1804,7 +1804,7 @@ async function portraitBar() {
     del.type = "button";
     del.onclick = async () => {
       if (!window.confirm(`删除「${p.name}」？这份画像的对话和记录都会清掉，不能恢复。`)) return;
-      await portraitOp(() => api("DELETE", `/api/portraits/${encodeURIComponent(p.id)}?uid=${S.uid}`), "dialogue");
+      await portraitOp(() => api("DELETE", `/api/portraits/${encodeURIComponent(p.id)}?uid=${S.uid}`), "dialogue", !!p.active);
     };
     chip.append(name, del);
     bar.appendChild(chip);
@@ -2377,19 +2377,23 @@ function trailStorageKey() {
    原来按回来的顺序记，前端停在 B、服务器在 C，任务区就拿 B 的教程在 C 里建任务（Codex 复现）。
    做完以服务器回的「哪一份是当前的」为准，不以点了哪个为准。 */
 let portraitBusy = false;
-async function portraitOp(run, nextView) {
+async function portraitOp(run, nextView, wasActive = false) {
   if (portraitBusy) { toast("正在切换画像，稍等"); return; }
   portraitBusy = true;
   try {
     const r = await run();
     if (r === null) return;
     const active = ((r && r.portraits) || []).find((item) => item.active);
+    const before = S.portraitId;
     S.portraitId = active ? active.id : "";
-    S.myDir = undefined;  // 方向是画像的：换了画像要重新问（原来切到数学画像，研读和信息源还按 AI 提示，Codex 复现）
-    // 下面这些也都属于上一份画像：项目表单（方向、阶段、关键词）和搜到的项目、打开的项目和任务、定位陈述草稿、
-    // 方向树上点着的节点。原来切到数学画像，项目表单还停在 AI、第 6 步和旧关键词（Codex 复现）
-    Object.assign(S, { projectForm: null, projectResult: null, projectKeywords: "", projectId: "",
-      openTaskId: "", posDraft: null, dirPicked: null });
+    // 只有当前画像真的换了（切换、新建、删掉的正是当前那份）才清：删一份不在用的画像，当前这份没写完的定位陈述不能跟着丢（Codex 复现）
+    if (wasActive || S.portraitId !== before || !before) {  // 删的是当前那份（最后一份删掉是原地清空、id 不变）也算换了
+      S.myDir = undefined;  // 方向是画像的：换了画像要重新问（原来切到数学画像，研读和信息源还按 AI 提示，Codex 复现）
+      // 下面这些也都属于上一份画像：项目表单（方向、阶段、关键词）和搜到的项目、打开的项目和任务、定位陈述草稿、
+      // 方向树上点着的节点。原来切到数学画像，项目表单还停在 AI、第 6 步和旧关键词（Codex 复现）
+      Object.assign(S, { projectForm: null, projectResult: null, projectKeywords: "", projectId: "",
+        openTaskId: "", posDraft: null, dirPicked: null });
+    }
     setView(nextView);
   } catch (e) {
     toast(e.message);
@@ -3182,7 +3186,16 @@ async function showTeacher(name) {
 /* ---------- ⑤⑥ 工作台 ---------- */
 
 function readDraft(tid) {
-  try { return localStorage.getItem(`rg_draft_${S.uid}_${tid}`) || ""; } catch (_) { return ""; }
+  try {
+    const key = `rg_draft_${S.uid}_${tid}`;
+    const cur = localStorage.getItem(key);
+    if (cur !== null) return cur;
+    // 升级前的草稿存在不带 uid 的键里：能打开这道任务的就是它的主人（任务 id 是这个人的），搬到新键、删掉旧键。
+    // 原来升级之后没交的草稿就看不见了（Codex 复现）
+    const old = localStorage.getItem("rg_draft_" + tid);
+    if (old) { localStorage.setItem(key, old); localStorage.removeItem("rg_draft_" + tid); }
+    return old || "";
+  } catch (_) { return ""; }
 }
 function writeDraft(tid, text) {
   try {

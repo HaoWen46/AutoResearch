@@ -642,13 +642,9 @@ def _evidence_pool(uid: str, conversation_id: str) -> list[str]:
     """校验引文用的证据池：本画像近期消息（含本轮刚写入的那条）。"""
     msgs = store.list_messages(uid, limit=40)
     # 只认学生自己的话：原来助手消息也在池里，助手上一轮说的「你擅长 Python」能当学生自述写进画像（Codex 复现）
-    pool = [m["text"] for m in msgs if m.get("text") and m.get("role") == "user"]
-    # 例外：学生这一句只是确认（「前者」「第二个」「对」），确认的是助手上一句给的选项——把那句助手的话拼在这句后面当证据。
-    # 原来只认学生的话之后，问「人工智能还是数学」、答「前者」，回复说选了人工智能，画像里却什么都没记（Codex 复现）
-    last = max((i for i, m in enumerate(msgs) if m.get("role") == "user"), default=-1)
-    if last > 0 and msgs[last - 1].get("role") == "assistant" and memory.CONFIRM_RE.match(msgs[last].get("text") or ""):
-        pool.append(f"{msgs[last]['text'].strip()}{memory.CONFIRM_SEP}{msgs[last - 1].get('text') or ''}")
-    return pool
+    # 只回「前者」「好」这种确认时也不借助手的话：试过把助手上一句拼进来当证据，结果「好」能把助手整段话变成学生自述、
+    # 用户还能伪造拼接的那一段（Codex 第十三轮复现）。宁可这一条不记、下次再问；界面上点选项发的是选项原文，照样有证据
+    return [m["text"] for m in msgs if m.get("text") and m.get("role") == "user"]
 
 
 # ---------- 降级：规则版一轮 ----------

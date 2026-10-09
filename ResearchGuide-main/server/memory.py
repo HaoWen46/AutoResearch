@@ -424,15 +424,16 @@ def support_ratio(value: str, quote: str) -> float:
 
 
 # 年级的说法：「大二」「本科二年级」「sophomore」是同一个（本科, 2）；「博士」是（博士, 不知第几年）。
-_GRADE_RE = re.compile(r"(本科|硕士|研究生|博士|高中)?(?:([大研硕博高])([一二三四五六1-6])|([一二三四五六1-6])年级)"
-                       r"|(本科|硕士|研究生|博士|高中)")
-_GRADE_STAGE = {"本科": "本", "大": "本", "硕士": "硕", "研究生": "硕", "研": "硕", "硕": "硕",
+_GRADE_RE = re.compile(r"(本科|硕士|研究生|博士|高中|大学)?\s*(?:([大研硕博高])([一二三四五六1-6])|(?<![0-9])第?([一二三四五六1-6])\s*(?:年级|年(?![代份]))"
+                       r")|(本科|硕士|研究生|博士|高中)")
+_GRADE_STAGE = {"本科": "本", "大学": "本", "大": "本", "硕士": "硕", "研究生": "硕", "研": "硕", "硕": "硕",
                 "博士": "博", "博": "博", "高中": "高", "高": "高"}
 _GRADE_YEAR = {c: i + 1 for i, c in enumerate("一二三四五六")} | {str(i): i for i in range(1, 7)}
 _GRADE_EN = {"freshman": ("本", 1), "sophomore": ("本", 2), "junior": ("本", 3), "senior": ("本", 4),
              "undergrad": ("本", None), "undergraduate": ("本", None), "master": ("硕", None),
              "masters": ("硕", None), "phd": ("博", None)}
-_NEGATED = re.compile(r"(?:不是|不再是|并非|非|没在|不在)\s*$")
+# 前面紧跟这些的年级不算现在的：否定（不是、不算）和过去（以前是、去年）。「以前是大一，现在大二」只有大二
+_NEGATED = re.compile(r"(?:不是|不再是|并非|非|没在|不在|不算|算不上|以前是|之前是|原来是|去年是|曾经是|以前|之前|原来|去年|曾经)\s*$")
 
 
 def _grades_in(text: str) -> list[tuple[str | None, int | None]]:
@@ -440,7 +441,7 @@ def _grades_in(text: str) -> list[tuple[str | None, int | None]]:
     text = text or ""
     out = []
     for m in _GRADE_RE.finditer(text):
-        if _NEGATED.search(text[max(0, m.start() - 4):m.start()]):
+        if _NEGATED.search(text[max(0, m.start() - 5):m.start()]):
             continue
         word, prefix, year, year2, alone = m.groups()
         stage = _GRADE_STAGE.get(word or prefix or alone or "")
@@ -484,17 +485,24 @@ def _cn_number(run: str) -> int | None:
     return total + cur
 
 
-def _numbers_in(text: str, chinese: bool) -> set[int]:
-    out = {int(d) for d in re.findall(r"\d{1,9}", text or "")}
-    if chinese:
-        out |= {n for run in re.findall(r"[零一二两三四五六七八九十百]+", text or "") if (n := _cn_number(run)) is not None}
+_UNIT = "小时分钟秒天周月年岁学分门个次篇项人倍%"
+
+
+def _numbers_in(text: str) -> set[float]:
+    """文本里的数，按数值：「3.70」「3.7」是同一个；中文数只认后面跟着单位的（「两小时」「二十学分」），免得「一些」也成了 1。"""
+    text = text or ""
+    out = {float(d) for d in re.findall(r"\d{1,9}(?:\.\d{1,4})?", text)}
+    for m in re.finditer(r"([零一二两三四五六七八九十百]+)(?=\s*[" + _UNIT + r"])", text):
+        n = _cn_number(m.group(1))
+        if n is not None:
+            out.add(float(n))
     return out
 
 
 def _numbers_supported(value: str, quote: str) -> bool:
-    """值里写的阿拉伯数字，引文里都得有（引文里的中文数也算）：原来「每周2小时」撑得住「每周20小时」（Codex 复现）。"""
-    want = _numbers_in(value, chinese=False)
-    return not want or want <= _numbers_in(quote, chinese=True)
+    """值里写的数，引文里都得有同一个数：原来「每周2小时」撑得住「每周20小时」、「3.07」撑得住「3.7」（Codex 复现）。"""
+    want = _numbers_in(value)
+    return not want or want <= _numbers_in(quote)
 
 
 def _short_value_supported(key: str, value: str, quote: str) -> bool:
@@ -508,12 +516,6 @@ def _short_value_supported(key: str, value: str, quote: str) -> bool:
     return not v or bool(v & _content_chars(_with_aliases(quote)))
 
 
-# 学生只回了一句确认（「前者」「第二个」「对」「好的」）：这句话本身撑不住任何值，它确认的是助手上一句给的选项。
-# 对话那边把这种回答和助手上一句拼成一条证据（dialogue._evidence_pool），这里认它。
-CONFIRM_RE = re.compile(r"^\s*(?:我选|选|就|要)?\s*(?:前者|后者|前一个|后一个|第[一二三四五六七八九十1-9]\s*(?:个|种|项|条|个吧)?|[1-9]|[A-Fa-f]"
-                        r"|这个|那个|就这个|都要|都行|是的?|对的?|嗯+|好的?|好啊|没错|可以|行|ok|okay|yes)\s*[。！!.,，~～吧呀啊]*\s*$",
-                        re.IGNORECASE)
-CONFIRM_SEP = " ⟪确认助手上一句⟫ "
 
 
 # 这条记忆改变未来的哪个决策。填不出就没资格进画像。
@@ -630,9 +632,6 @@ def validate_ops(uid: str, ops: list[dict[str, Any]], evidence_pool: list[str]) 
 
         # 闸门②：引文得撑得住这个值。
         quote = str(raw.get("evidence_quote") or "").strip()
-        if CONFIRM_RE.match(quote):
-            # 引的是一句确认：拿它连同被确认的那句助手的话一起来撑（只有对话那边拼过的才有）
-            quote = next((t for t in evidence_pool if CONFIRM_SEP in t and t.startswith(quote)), quote)
         substantive = len(_content_chars(value)) >= _SUPPORT_MIN_CHARS
         ratio = support_ratio(value, quote) if (op in ("add", "replace") and substantive) else 1.0
         if op in ("add", "replace") and substantive and ratio < _SUPPORT_FLOOR:

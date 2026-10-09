@@ -188,8 +188,13 @@ def chat(system: str, user: str, *, temperature: float = 0.4, timeout: int = 25,
 
 
 def _clean_text(s: str) -> str:
-    """去掉落单的代理字符（JSON 里的 \\ud800 这类）：它们写不进 SQLite，原来先存了事实、到存回复时才报错（Codex 复现）。"""
-    return s.encode("utf-8", "replace").decode("utf-8") if any("\ud800" <= c <= "\udfff" for c in s) else s
+    """去掉落单的代理字符（JSON 里的 \\ud800 这类）：它们写不进 SQLite，原来先存了事实、到存回复时才报错（Codex 复现）。
+    先整段编码一次（C 速度），编不过才替换：逐字扫描 2 MB 要 85 毫秒（Codex 测过）。"""
+    try:
+        s.encode("utf-8")
+        return s
+    except UnicodeEncodeError:
+        return s.encode("utf-8", "replace").decode("utf-8")
 
 
 def _clean(obj: Any) -> Any:
@@ -217,9 +222,10 @@ def chat_json(system: str, user: str, *, timeout: int = 30, tag: str = "json") -
         return None
     try:
         data = json.loads(cleaned[start:end + 1])
+        # 清理也可能在很深的嵌套上递归出错：和解析失败一样当这次调用失败，走回退（原来 600 层数组就 500，Codex 复现）
+        return _clean(data) if isinstance(data, dict) else None
     except (json.JSONDecodeError, RecursionError):
         return None
-    return _clean(data) if isinstance(data, dict) else None
 
 
 def chat_stream(system: str, user: str, *, temperature: float = 0.6, timeout: int = 60,
@@ -277,23 +283,27 @@ def chat_stream(system: str, user: str, *, temperature: float = 0.6, timeout: in
             # 块的形状逐层核对，不对就跳过：原来 choices 不是列表、delta 不是对象会抛异常，content 是列表会原样交出去（Codex 复现）
             choices = chunk.get("choices") if isinstance(chunk, dict) else None
             choice = choices[0] if isinstance(choices, list) and choices and isinstance(choices[0], dict) else {}
-            reason = choice.get("finish_reason")
+            delta = choice.get("delta")
+            piece = delta.get("content") if isinstance(delta, dict) else None
+            if piece and isinstance(piece, str):
+                if status is not None and status.get("finished"):
+                    status["finished"] = False  # 说了 stop 之后又来正文：以最后收到的为准，得再等一个 stop / [DONE]（Codex 复现）
+                pieces += 1
+                yield _clean_text(piece)
+            reason = choice.get("finish_reason")  # 和最后一段正文同一块来的 stop 也算：先处理正文再看它
             if reason and status is not None:
                 # 只有 stop 是说完了；length（到了字数上限）、content_filter 这些都是半截：原来一律当正常收尾，半截覆盖了完整回复（Codex 复现）
                 status["finished"] = reason == "stop" and not status.get("cut")
                 if reason != "stop":
                     status["cut"] = str(reason)[:40]
-            delta = choice.get("delta")
-            piece = delta.get("content") if isinstance(delta, dict) else None
-            if piece and isinstance(piece, str):
-                pieces += 1
-                yield _clean_text(piece)
     except urllib.error.HTTPError as exc:
         err = f"http {exc.code}"
     except ReadLimitError as exc:
         err = f"limit {exc}"
     except (urllib.error.URLError, TimeoutError, OSError) as exc:
         err = f"network {type(exc).__name__}"
+    if err and status is not None:
+        status["finished"] = False  # 收到 stop 之后传输又出错：照样算没说完
     print(json.dumps({
         "llm": tag, "model": cfg["model"], "ok": pieces > 0,
         "ms": int((time.time() - t0) * 1000), "chunks": pieces, "error": err or None,

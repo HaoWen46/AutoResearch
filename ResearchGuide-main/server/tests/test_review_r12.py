@@ -92,8 +92,9 @@ def test_booleans_are_still_rejected_as_values():
     assert acc == [] and rej[0]["reason"] == "bad_type:value"
 
 
-def test_confirming_an_option_the_assistant_offered_is_evidence(monkeypatch):
-    """助手问「人工智能还是数学」，学生答「前者」：回复说选了人工智能，原来画像里什么都没记（Codex 复现）。"""
+def test_a_bare_confirmation_does_not_turn_assistant_words_into_a_declared_fact(monkeypatch):
+    """助手问「人工智能还是数学」，学生只回「前者」/「好」：不借助手的话写成学生自述。
+    第十二轮试过借，第十三轮 Codex 复现「好」能把助手整段话（含编的）变成学生自述、还能被伪造——宁可不记、下次再问。"""
     uid = _uid()
     monkeypatch.setattr(llm, "enabled", lambda: True)
 
@@ -103,14 +104,17 @@ def test_confirming_an_option_the_assistant_offered_is_evidence(monkeypatch):
                 "dialogue": {"move": "answer", "reason": "确认", "reply": reply, "offered_actions": []}}
 
     with budget.unmetered():
-        monkeypatch.setattr(llm, "chat_json", lambda s, u, **k: proposal([], "你更想先看人工智能还是数学？")
+        monkeypatch.setattr(llm, "chat_json", lambda s, u, **k: proposal([], "你同学每周有20小时。你更想先看人工智能还是数学？")
                             if k.get("tag") == "dialogue.proposal" else None)
         dialogue.turn(uid, "我还没想好方向")
-        op = {"op": "add", "key": "direction:ai", "value": "人工智能", "evidence_quote": "前者", "affects": "direction_choice"}
-        monkeypatch.setattr(llm, "chat_json", lambda s, u, **k: proposal([op], "好，先看人工智能。")
+        ops = [{"op": "add", "key": "direction:math", "value": "数学", "evidence_quote": "前者", "affects": "direction_choice"},
+               {"op": "add", "key": "constraint:time", "value": "每周20小时", "evidence_quote": "你同学每周有20小时",
+                "affects": "task_difficulty"}]
+        monkeypatch.setattr(llm, "chat_json", lambda s, u, **k: proposal(ops, "好。")
                             if k.get("tag") == "dialogue.proposal" else None)
         r = dialogue.turn(uid, "前者")
-    assert [f["key"] for f in r["facts_added"]] == ["direction:ai"], r["rejected_ops"]
+    assert r["facts_added"] == []
+    assert {x["reason"] for x in r["rejected_ops"]} <= {"short_value_not_in_evidence", "evidence_not_found", "number_not_in_evidence"}
 
 
 def test_a_plain_greeting_still_cannot_borrow_the_assistants_words():
@@ -186,3 +190,59 @@ def test_evidence_with_a_quote_of_the_wrong_type_is_dropped(monkeypatch, quote):
     monkeypatch.setattr(llm, "chat_json", lambda *a, **k: {"criteria": crit, "summary": "好"})
     r = submission.review(buf.getvalue(), {"name": "情感分类基线", "todo": "做两个基线"})
     assert all(c["evidence"] == [] and c["status"] != "pass" for c in r["criteria"])
+
+
+@pytest.mark.parametrize("key,value,quote,ok", [
+    ("grade", "本科二年级", "我是本科第2年", True),
+    ("grade", "大二", "读本科第二年了", True),
+    ("grade", "大一", "以前是大一，现在大二", False),   # 过去的不算
+    ("grade", "大二", "以前是大一，现在大二", True),
+    ("grade", "大二", "不算大二吧，我休学了", False),   # 含糊的否定
+    ("grade", "大四", "我2024年入学，现在大二", False),  # 入学年份里的 4 不是年级
+])
+def test_grade_phrasings_round13(key, value, quote, ok):
+    """第十三轮：「本科第2年」认得；「以前是大一」「不算大二」不算现在的；年份里的数字不当年级（Codex 复现）。"""
+    acc, rej = _check(key, value, quote)
+    assert (len(acc) == 1) is ok, rej
+
+
+@pytest.mark.parametrize("value,quote,ok", [
+    ("GPA 3.7", "GPA 3.70", True),        # 同一个数
+    ("GPA 3.7", "GPA 3.07", False),       # 改了值
+    ("每周二十小时", "每周两小时", False),  # 中文数带单位也比
+    ("每周2小时", "每周两小时", True),
+    ("有一些基础", "有些基础", True),      # 不带单位的「一」不算数
+])
+def test_numbers_are_compared_by_value(value, quote, ok):
+    assert memory._numbers_supported(value, quote) is ok
+
+
+def test_deeply_nested_model_json_is_a_failed_call(monkeypatch):
+    """六百层数组的合法 JSON：清理时递归出错，原来对话直接 500（Codex 复现）。现在当这次调用失败、走回退。"""
+    monkeypatch.setenv("LLM_API_KEY", "dummy-test-key")
+    deep = '{"a": ' + "[" * 5000 + "]" * 5000 + "}"
+    monkeypatch.setattr(llm, "chat", lambda *a, **k: deep)
+    with budget.unmetered():
+        assert llm.chat_json("s", "u") is None
+
+
+@pytest.mark.parametrize("tail", [
+    ['data: {"choices":[{"delta":{"content":"再读方法，然后"}}]}'.encode()],                      # stop 之后又来正文，然后断了
+    ['data: {"choices":[{"delta":{"content":"再读方法，然后"}}]}'.encode(), OSError("reset")],     # 之后传输出错
+])
+def test_an_early_stop_followed_by_more_text_is_not_finished(monkeypatch, tail):
+    """先给了 stop、后面又来正文再断：原来按 stop 算说完了，半截覆盖完整回复（Codex 复现）。"""
+    def lines():
+        yield 'data: {"choices":[{"delta":{"content":"先读摘要。"},"finish_reason":"stop"}]}'.encode()
+        for t in tail:
+            if isinstance(t, Exception):
+                raise t
+            yield t
+
+    monkeypatch.setenv("LLM_API_KEY", "dummy-test-key")
+    monkeypatch.setenv("LLM_BASE_URL", "https://model.invalid/v1")
+    monkeypatch.setattr(llm, "stream", lambda *a, **k: lines())
+    status: dict = {}
+    with budget.unmetered():
+        list(llm.chat_stream("s", "u", status=status))
+    assert not status.get("finished")

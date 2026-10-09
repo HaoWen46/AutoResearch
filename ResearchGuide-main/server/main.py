@@ -21,6 +21,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+import anyio
 import anyio.to_thread
 from fastapi import Depends, FastAPI, HTTPException, Request
 from starlette.concurrency import run_in_threadpool
@@ -67,14 +68,23 @@ CROWDED_MSG = "现在用的人太多，模型那边在排队。请过一会儿�
 
 def _model_work(fn):
     """把一个同步接口挪进 _MODEL 里跑。FastAPI 照样按原函数的签名解析参数；拿锁的依赖（SERIAL）在外面，
-    排队期间照样拿着这个人的锁。等待的协程被取消时，还没开始的活随之取消（asyncio.wrap_future 会转过去）。"""
+    排队期间照样拿着这个人的锁。
+
+    请求被取消（服务在关、外层的取消域）时：还在排队的活撤掉；已经在跑的要等它做完才往外走——
+    锁是外面的依赖在退出时放的，提前出去就提前放锁，切画像就能插进来，这一轮的结果写进新画像（Codex 复现）。"""
     @functools.wraps(fn)
     async def endpoint(*args, **kwargs):
         try:
             fut = _MODEL.submit(functools.partial(fn, *args, **kwargs))
         except Overloaded as exc:
             raise HTTPException(503, CROWDED_MSG) from exc
-        return await asyncio.wrap_future(fut)
+        try:
+            return await asyncio.wrap_future(fut)
+        except BaseException:
+            if not fut.cancel() and not fut.done():
+                with anyio.CancelScope(shield=True):  # 取消域每次 await 都会再取消一次：挡住，等它做完
+                    await asyncio.wait([asyncio.wrap_future(fut)])
+            raise
     return endpoint
 
 

@@ -257,3 +257,77 @@ def test_no_retry_without_budget_for_it(monkeypatch):
     finally:
         budget._WHO.set(None)
     assert len(posts) == 1 and store.llm_calls(budget._today(), uid) == 1
+
+
+def test_cancelled_queued_work_is_dropped_at_once():
+    """线程都在忙时，排队的活被取消：当场从队里拿掉，带着的请求内容一起放掉；反复发起又断开也堆不起来。
+    原来用 ThreadPoolExecutor：取消了的还留在它的内部队列里，上限 1 堆了 64 份（Codex 复现）。"""
+    import gc
+    import weakref
+
+    class Body:
+        pass
+
+    pool = workpool.BoundedPool(1, 1, "t")
+    hold = threading.Event()
+    blocker = pool.submit(hold.wait, 10)
+    refs = []
+    try:
+        for _ in range(64):
+            body = Body()
+            refs.append(weakref.ref(body))
+            f = pool.submit(lambda b=body: b)
+            del body
+            assert f.cancel()
+            assert pool.stats()["queued"] == 0 and len(pool._queue) == 0
+        gc.collect()
+        assert all(r() is None for r in refs)  # 64 份请求内容都放掉了
+    finally:
+        hold.set()
+    blocker.result(5)
+
+
+def test_a_cancelled_request_waits_for_its_running_work_before_letting_go():
+    """请求在模型那一步被取消（服务在关、外层取消域）：已经在跑的活要等它做完，拿锁的依赖才退出；
+    原来立刻出去、锁先放了，切画像插进来，这一轮的结果写进了新画像（Codex 复现）。排队没开始的照旧马上撤掉。"""
+    import anyio
+
+    pool = workpool.BoundedPool(1, 4, "t")
+    release, done, ran = threading.Event(), threading.Event(), []
+
+    def slow():
+        assert release.wait(5)
+        done.set()
+
+    def never():
+        ran.append(1)
+
+    orig = main._MODEL
+    main._MODEL = pool
+    try:
+        async def go():
+            threading.Timer(0.3, release.set).start()
+            t0 = time.monotonic()
+            with anyio.move_on_after(0.05):
+                await main._model_work(slow)()
+            return time.monotonic() - t0
+
+        waited = anyio.run(go)
+        assert done.is_set() and waited >= 0.25  # 做完才出来
+
+        hold = threading.Event()
+        blocker = pool.submit(hold.wait, 5)
+
+        async def go_queued():
+            t0 = time.monotonic()
+            with anyio.move_on_after(0.05):
+                await main._model_work(never)()
+            return time.monotonic() - t0
+
+        assert anyio.run(go_queued) < 1  # 还在排队：马上撤掉，不等前面的
+        hold.set()
+        blocker.result(5)
+        time.sleep(0.05)
+        assert ran == [] and pool.stats()["queued"] == 0
+    finally:
+        main._MODEL = orig

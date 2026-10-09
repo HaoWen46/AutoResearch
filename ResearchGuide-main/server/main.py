@@ -76,20 +76,19 @@ BUSY_MSG = "上一件事还在处理（比如正在等模型回话），稍后�
 
 async def _serial(request: Request):
     """会改这个人数据的接口挂这个依赖：执行期间拿着这个人的锁（userlock.py）。
-    等锁放在工作线程里，不占事件循环；等不到回 409。"""
+    在事件循环里异步等锁，不占工作线程；等不到或这个人排队的请求太多回 409。"""
     uid = auth.me(request)
     if not uid:
         yield
         return
-    cm = userlock.hold(uid)
     try:
-        await run_in_threadpool(cm.__enter__)
+        ticket = await userlock.acquire(uid)
     except userlock.Busy as exc:
         raise HTTPException(409, BUSY_MSG) from exc
     try:
         yield
     finally:
-        cm.__exit__(None, None, None)
+        ticket.release()
 
 
 SERIAL = [Depends(_serial)]
@@ -347,31 +346,61 @@ def _sse(event: str, data: dict) -> str:
     return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
 
 
+# 流式对话的每一轮在这个池子里从头跑到尾：它拿着这个人的锁，不管浏览器断没断都做完、放锁。
+# 原来在响应的同步生成器里跑：浏览器断开时 Starlette 不关生成器，锁要等垃圾回收才放（Codex 复现：之后的改动全 409），
+# 而且每一轮占着一个公用的工作线程。
+_TURN_POOL = ThreadPoolExecutor(max_workers=int(os.environ.get("QIYAN_TURN_THREADS") or 32), thread_name_prefix="turn")
+
+
 @app.post("/api/dialogue/stream")
-def dialogue_stream(req: DialogueTurnReq):
+async def dialogue_stream(req: DialogueTurnReq):
     """与 /api/dialogue/turn 同一份内核，但把阶段推进和回复增量实时推给前端。
 
     事件：stage（observe/decide/memory/tool/compose）、delta（正文增量）、
     result（完整响应体，与 turn 一致）、error。
     """
-    _user_or_404(req.uid)
+    await run_in_threadpool(_user_or_404, req.uid)
     if not req.message.strip():
         raise HTTPException(400, "message is required")
+    try:
+        ticket = await userlock.acquire(req.uid)  # 整轮拿着这个人的锁：等模型时切画像、再发一句，都等它做完
+    except userlock.Busy as exc:
+        raise HTTPException(409, BUSY_MSG) from exc
+    loop = asyncio.get_running_loop()
+    events: asyncio.Queue = asyncio.Queue()
 
-    def gen():
+    def put(item: str | None) -> None:
         try:
-            with userlock.hold(req.uid):  # 整轮拿着这个人的锁：等模型时切画像、并发再发一句，都会等它做完
-                for kind, payload in dialogue.turn_steps(req.uid, req.message,
-                                                         req.conversation_id, stream_reply=True):
-                    yield _sse(kind, payload)
-        except userlock.Busy:
-            yield _sse("error", {"error": BUSY_MSG})
-        except ValueError as exc:
-            yield _sse("error", {"error": str(exc)})
-        except Exception as exc:  # 流已经开始，不能再抛 HTTP 错误，只能作为事件送出去
-            yield _sse("error", {"error": f"{type(exc).__name__}: {exc}"})
+            loop.call_soon_threadsafe(events.put_nowait, item)
+        except RuntimeError:
+            pass  # 服务在关：没人收了
 
-    return StreamingResponse(gen(), media_type="text/event-stream",
+    def work() -> None:
+        try:
+            for kind, payload in dialogue.turn_steps(req.uid, req.message, req.conversation_id, stream_reply=True):
+                put(_sse(kind, payload))
+        except ValueError as exc:
+            put(_sse("error", {"error": str(exc)}))
+        except Exception as exc:  # noqa: BLE001 — 流已经开始，不能再抛 HTTP 错误，只能作为事件送出去
+            put(_sse("error", {"error": f"{type(exc).__name__}: {exc}"}))
+        finally:
+            ticket.release()
+            put(None)
+
+    try:
+        loop.run_in_executor(_TURN_POOL, contextvars.copy_context().run, work)  # 带上请求上下文（模型额度算在谁头上）
+    except BaseException:
+        ticket.release()
+        raise
+
+    async def relay():
+        while True:
+            item = await events.get()
+            if item is None:
+                return
+            yield item
+
+    return StreamingResponse(relay(), media_type="text/event-stream",
                              headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
 

@@ -843,18 +843,19 @@ def test_concurrent_reviews_build_the_quote_index_once(monkeypatch):
 def test_concurrent_card_submissions_wait_for_the_index_off_the_workers(monkeypatch):
     import quotes
     quotes.clear_prepared()
-    uid = store.create_user("t")["uid"]
+    # 四十个不同的人同时交同一篇（同一个人连交四十张会被每人排队上限挡掉，那是 userlock 的事，见 test_same_user_races）
+    uids = [store.create_user(f"t{i}")["uid"] for i in range(40)]
     paper = {"id": "2310.17623", "title": "T", "source": "html", "url": "u",
              "text": "Abstract\n" + "We study things. " * 20_000 + "\n6 Limitations\nIt is limited."}
     monkeypatch.setattr(arxiv, "fulltext", lambda aid: paper)
     built = []
     real = quotes._index
     monkeypatch.setattr(quotes, "_index", lambda text: built.append(1) or time.sleep(BLOCK) or real(text))
-    body = {"uid": uid, "kit": "llm-eval", "arxiv_id": "2310.17623", "fields": {"claim_quote": "We study things. We study"}, "dims": {}}
+    body = {"kit": "llm-eval", "arxiv_id": "2310.17623", "fields": {"claim_quote": "We study things. We study"}, "dims": {}}
 
     async def go():
         async with _asgi() as c:
-            subs = [asyncio.create_task(c.post("/api/cards", json=body)) for _ in range(40)]
+            subs = [asyncio.create_task(c.post("/api/cards", json={**body, "uid": u})) for u in uids]
             await asyncio.sleep(0.1)
             t0 = time.perf_counter()
             health = await c.get("/api/health")

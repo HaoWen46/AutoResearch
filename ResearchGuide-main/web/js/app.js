@@ -132,7 +132,11 @@ async function api(method, path, body) {
   const res = await apiFetch(path, opt);
   let data = null;
   try { data = await res.json(); } catch (_) { /* no body */ }
-  if (!res.ok) throw new Error(errText(data, res.status));
+  if (!res.ok) {
+    const err = new Error(errText(data, res.status));
+    err.status = res.status;
+    throw err;
+  }
   return data;
 }
 
@@ -748,10 +752,15 @@ function clearLocalDrafts(keep) {
   } catch (_) { /* 无痕模式等 */ }
 }
 
-function clearSession() {
+/* purge：连这台浏览器里这个人的草稿一起清。只在明确退出、删号时清；登录过期（401）不清——
+   草稿的键带着 uid，别人看不到，同一个人重新登录还能接着写。 */
+function clearSession(purge) {
   S.uid = ""; S.token = ""; S.wechat = false; S.guest = true;
   S.myDir = undefined; S.portraitId = "";
-  clearLocalDrafts();
+  if (purge) clearLocalDrafts();
+  else ["rg_uid", "rg_token", "rg_nick"].forEach((k) => {
+    try { localStorage.removeItem(k); } catch (_) { /* 无痕模式等 */ }
+  });
 }
 
 function signedOut(msg) {
@@ -1003,7 +1012,7 @@ function renderLogin() {
 async function logout() {
   stopWxPoll();
   try { await api("POST", "/api/auth/logout"); } catch (_) { /* 会话已经没了也照样退 */ }
-  clearSession();
+  clearSession(true);
   reloadInto("home");
 }
 
@@ -1037,7 +1046,7 @@ function accountPanel() {
     if (typed.trim() !== "删除") { toast("没有删除：输入的不是「删除」"); return; }
     try {
       await api("DELETE", "/api/me");
-      clearSession();
+      clearSession(true);
       reloadInto("home", "账号和记录都删了");
     } catch (e) { toast(e.message); }
   });
@@ -4175,7 +4184,12 @@ async function renderProject() {
       const data = await res.json().catch(() => null);
       if (!res.ok) throw new Error((data && data.detail) || `提交失败 (${res.status})`);
       paintReview(result, data, false, (p.reviews || [])[0]);
-      p.reviews = [data].concat(p.reviews || []);
+      if (data.recorded === false) {
+        // 评阅做完了但没记进项目（比如评阅期间在别的页面切了画像）：照样给看结果，但说清楚没保存
+        result.prepend(el("div", "note-box", esc(data.note || "这次评阅没有保存。") + "要保存的话，切回原来的画像再交一次。"));
+      } else {
+        p.reviews = [data].concat(p.reviews || []);
+      }
       result.scrollIntoView({ behavior: "smooth", block: "start" });
     } catch (e) {
       result.innerHTML = "";
@@ -4336,7 +4350,11 @@ document.getElementById("brandHome").addEventListener("click", () => setView("ho
   let needConsent = false;
   if (S.uid && !S.token) {
     // 有账号之前，浏览器里只存了 uid：凭它认领一次，换成会话
-    try { setSession(await api("POST", "/api/auth/legacy", { uid: S.uid })); } catch (_) { clearSession(); }
+    try {
+      setSession(await api("POST", "/api/auth/legacy", { uid: S.uid }));
+    } catch (e) {
+      if (e.status === 401) clearSession();  // 认领过或不存在；网络错误时 uid 是这个人唯一的凭证，不能扔
+    }
   }
   if (S.token) {
     try {
@@ -4344,9 +4362,14 @@ document.getElementById("brandHome").addEventListener("click", () => setView("ho
       setSession(me);
       needConsent = !me.consent_ok;
       await resumeUser();
-    } catch (_) {
-      clearSession();
-      S.resume = "login";
+    } catch (e) {
+      if ([401, 404, 410].includes(e.status)) {  // 会话确实没了：清身份（草稿不动）
+        clearSession();
+        S.resume = "login";
+      } else {
+        // 网络断了、服务器在重启：会话和草稿都留着，原来这里一律清掉，草稿就永久没了（Codex 复现）
+        setTimeout(() => toast("暂时连不上服务器，稍后刷新一下"), 800);
+      }
     }
   }
   let next = "home", note = "";

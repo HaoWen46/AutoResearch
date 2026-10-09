@@ -68,7 +68,91 @@ def test_streaming_turn_refuses_a_second_concurrent_turn(monkeypatch):
     uid = store.create_user("连发")["uid"]
     with userlock.hold(uid):  # 模拟上一句还在处理
         r = TestClient(main.app).post("/api/dialogue/stream", json={"uid": uid, "message": "再发一句"})
-    assert r.status_code == 200 and "event: error" in r.text and "还在处理" in r.text
+    assert r.status_code == 409 and "还在处理" in r.json()["detail"]
+
+
+def test_a_disconnected_stream_still_finishes_its_turn_and_releases_the_lock(monkeypatch):
+    """原来浏览器断开时生成器不被关闭，锁要等垃圾回收才放，之后这个人的改动全 409（Codex 复现）。"""
+    import asyncio
+    import gc
+    import httpx
+    uid = store.create_user("断开")["uid"]
+    release, finished = threading.Event(), threading.Event()
+
+    def slow_steps(uid_, message, conversation_id=None, stream_reply=False):
+        yield "stage", {"stage": "observe"}
+        assert release.wait(5)  # 模型还在想
+        store.add_message(uid_, "assistant", "这一轮照样做完")
+        finished.set()
+        yield "result", {"reply": "ok"}
+
+    monkeypatch.setattr(dialogue, "turn_steps", slow_steps)
+    gc.disable()  # 证明放锁不靠垃圾回收
+    try:
+        async def run():
+            # 直接驱动 ASGI：收到第一块正文后，receive 回 http.disconnect（Uvicorn 在浏览器断开时就是这样）
+            body = json.dumps({"uid": uid, "message": "说一句"}).encode()
+            first_chunk, sent_request = asyncio.Event(), [False]
+
+            async def receive():
+                if not sent_request[0]:
+                    sent_request[0] = True
+                    return {"type": "http.request", "body": body, "more_body": False}
+                await first_chunk.wait()
+                return {"type": "http.disconnect"}
+
+            async def send(msg):
+                if msg["type"] == "http.response.body" and msg.get("body"):
+                    first_chunk.set()
+
+            scope = {"type": "http", "asgi": {"version": "3.0", "spec_version": "2.3"}, "http_version": "1.1",
+                     "method": "POST", "scheme": "http", "path": "/api/dialogue/stream", "raw_path": b"/api/dialogue/stream",
+                     "query_string": b"", "root_path": "", "server": ("t", 80), "client": ("127.0.0.1", 1),
+                     "headers": [(b"content-type", b"application/json"), (b"content-length", str(len(body)).encode())]}
+            app_task = asyncio.create_task(main.app(scope, receive, send))
+            await asyncio.wait_for(first_chunk.wait(), 5)
+            await asyncio.wait_for(app_task, 5)  # 响应因为断开结束了
+            held_after_disconnect = userlock.busy(uid)  # 这一轮还在跑，锁应当还拿着
+            release.set()
+            for _ in range(150):
+                if not userlock.busy(uid):
+                    break
+                await asyncio.sleep(0.02)
+            return held_after_disconnect, userlock.busy(uid)
+
+        held_after_disconnect, still_busy = asyncio.run(run())
+    finally:
+        gc.enable()
+    assert held_after_disconnect  # 断开不等于这一轮做完：在它写完之前别人不能切画像
+    assert finished.is_set() and not still_busy
+    assert any(m["text"] == "这一轮照样做完" for m in store.list_messages(uid))
+
+
+def test_waiting_for_a_users_lock_does_not_starve_the_server(monkeypatch):
+    """原来等锁占着工作线程：同一个人几十个改动请求就能占满线程池，别人连健康检查都卡住（Codex 复现）。"""
+    import asyncio
+    import httpx
+    import time as _t
+    uid = store.create_user("连点")["uid"]
+    monkeypatch.setattr(userlock, "WAIT", 1.0)
+    edge = {"uid": uid, "kind": "language", "text": "粤语母语", "evidence_url": ""}
+
+    async def run():
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=main.app), base_url="http://t") as c:
+            with userlock.hold(uid):  # 这个人有一件事正在做
+                edits = [asyncio.create_task(c.post("/api/edges", json=edge)) for _ in range(30)]
+                await asyncio.sleep(0.1)
+                t0 = _t.perf_counter()
+                h = await c.get("/api/health")
+                health_s = _t.perf_counter() - t0
+                await asyncio.sleep(0.05)
+            codes = [r.status_code for r in await asyncio.gather(*edits)]
+        return h.status_code, health_s, codes
+
+    hs, health_s, codes = asyncio.run(run())
+    assert hs == 200 and health_s < 0.5  # 别人的请求照常
+    assert codes.count(409) >= 30 - userlock.MAX_WAITERS  # 排队超过上限的立刻 409
+    assert codes.count(200) <= userlock.MAX_WAITERS
 
 
 def test_two_concurrent_project_reviews_are_both_recorded(monkeypatch):

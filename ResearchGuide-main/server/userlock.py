@@ -60,6 +60,51 @@ def hold(uid: str, wait: float | None = None) -> Iterator[None]:
         _unref(uid)
 
 
+MAX_WAITERS = 4  # 同一个人同时最多几个请求在等锁；再多直接 409（一个人连发几百个改动不该占满服务）
+_POLL = 0.02
+
+
+class Ticket:
+    """异步拿到的锁。release 可以调多次，只放一次。"""
+
+    def __init__(self, uid: str, lock: threading.Lock) -> None:
+        self.uid, self._lock, self._done = uid, lock, False
+        self._mu = threading.Lock()
+
+    def release(self) -> None:
+        with self._mu:
+            if self._done:
+                return
+            self._done = True
+        self._lock.release()
+        _unref(self.uid)
+
+
+async def acquire(uid: str, wait: float | None = None) -> Ticket:
+    """在事件循环里等这个人的锁：轮询 + asyncio.sleep，不占任何工作线程。
+    原来在工作线程里阻塞地等：同一个人的几十个改动请求就能把所有工作线程占住，
+    拿着锁的那个请求反而拿不到线程去做完、去放锁（Codex 复现）。等不到或排队的人太多抛 Busy。"""
+    import asyncio
+    wait = WAIT if wait is None else wait
+    with _GUARD:
+        slot = _LOCKS.setdefault(uid, [threading.Lock(), 0])
+        if slot[1] > MAX_WAITERS:  # 拿着锁的一个 + 在等的 MAX_WAITERS 个
+            raise Busy(uid)
+        slot[1] += 1
+        lock = slot[0]
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + wait
+    try:
+        while not lock.acquire(blocking=False):
+            if loop.time() >= deadline:
+                raise Busy(uid)
+            await asyncio.sleep(_POLL)
+    except BaseException:
+        _unref(uid)
+        raise
+    return Ticket(uid, lock)
+
+
 def busy(uid: str) -> bool:
     with _GUARD:
         slot = _LOCKS.get(uid)

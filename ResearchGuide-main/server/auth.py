@@ -29,6 +29,7 @@ from fastapi.responses import JSONResponse, PlainTextResponse, Response
 from pydantic import BaseModel
 from starlette.concurrency import run_in_threadpool
 
+import budget
 import store
 import wechat
 
@@ -81,6 +82,7 @@ def _session_uid(request: Request) -> str | None:
 async def guard(request: Request) -> None:
     """挂在整个 app 上的依赖。公开接口直接放行；其余的先认会话，再核对请求里自称的 uid。"""
     route = request.scope.get("route")
+    budget.bind(None)  # 先当匿名：公开接口不许调模型
     if getattr(route, "path", None) in PUBLIC:
         return
     # 查会话是一次 SQLite 读：放线程池，别在事件循环上做。每个请求都经过这里，库在网络盘上时一次就是几毫秒，
@@ -89,6 +91,7 @@ async def guard(request: Request) -> None:
     if not uid:
         raise HTTPException(401, "请先登录", headers={"WWW-Authenticate": "Bearer"})
     request.state.uid = uid
+    budget.bind(uid)  # 这个请求里的模型调用算在这个人头上
     claimed = [*request.query_params.getlist("uid"), request.path_params.get("uid")]
     # 有请求体的接口：不看 Content-Type，只要体是 JSON 对象就核对里面的 uid。
     # FastAPI 对没有 Content-Type、application/JSON、application/xxx+json 都照样当 JSON 解析；
@@ -187,6 +190,7 @@ def account(uid: str) -> dict[str, Any]:
         "guest": not u.get("wechat_openid"),
         "consent_ok": u.get("consent_version") == PRIVACY_VERSION,
         "privacy_version": PRIVACY_VERSION,
+        "llm_left": budget.left(uid) if u else 0,  # 今天还能让模型回答几次
     }
 
 

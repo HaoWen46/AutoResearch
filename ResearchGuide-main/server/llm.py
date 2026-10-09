@@ -18,6 +18,7 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
+import budget
 import envfile
 from limits import ReadLimitError, fetch, stream
 
@@ -44,7 +45,8 @@ def config() -> dict:
 
 
 def enabled() -> bool:
-    return config()["enabled"]
+    """配了密钥，并且这个请求的人今天还有额度（budget.py）。各功能在这里拿到 False 就走规则版。"""
+    return config()["enabled"] and budget.allowed()
 
 
 def apply_config(base_url: str, api_key: str, model: str, *, persist: bool = True) -> dict:
@@ -85,7 +87,8 @@ def probe() -> dict:
     cfg = config()
     if not cfg["enabled"]:
         return {"ok": False, "error": "未配置 API key"}
-    text = chat("只回复 ok 两个字母。", "ping", temperature=0, timeout=20)
+    with budget.unmetered():  # 管理员测连通，不算在任何人头上
+        text = chat("只回复 ok 两个字母。", "ping", temperature=0, timeout=20)
     if not text:
         return {"ok": False, "error": "请求失败，请检查地址、密钥和网络", "model": cfg["model"]}
     return {"ok": True, "model": cfg["model"], "base_url": cfg["base_url"], "sample": text[:40]}
@@ -126,9 +129,12 @@ def _deepseek_extras(cfg: dict, effort: str) -> dict:
 
 def chat(system: str, user: str, *, temperature: float = 0.4, timeout: int = 25,
          json_mode: bool = False, tag: str = "chat", max_tokens: int = 2000) -> str | None:
-    """返回助手文本；失败或未配置返回 None。网络错误、429、5xx 重试一次。"""
+    """返回助手文本；失败、未配置或没有额度返回 None。网络错误、429、5xx 重试一次（只扣一笔）。"""
     cfg = config()
     if not cfg["enabled"]:
+        return None
+    if not budget.charge():
+        print(json.dumps({"llm": tag, "skipped": "budget"}, ensure_ascii=False))
         return None
     key = os.environ.get("LLM_API_KEY") or os.environ.get("OPENAI_API_KEY") or os.environ.get("DEEPSEEK_API_KEY")
     payload: dict = {
@@ -200,6 +206,9 @@ def chat_stream(system: str, user: str, *, temperature: float = 0.6, timeout: in
     """
     cfg = config()
     if not cfg["enabled"]:
+        return
+    if not budget.charge():
+        print(json.dumps({"llm": tag, "skipped": "budget"}, ensure_ascii=False))
         return
     key = os.environ.get("LLM_API_KEY") or os.environ.get("OPENAI_API_KEY") or os.environ.get("DEEPSEEK_API_KEY")
     payload: dict = {

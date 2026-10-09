@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import hmac
 import json
 import os
@@ -868,7 +869,9 @@ async def project_submit(pid: str, uid: str, request: Request):
         raise HTTPException(503, "现在交的人太多，评阅在排队。请过一两分钟再交。")
     _review_pending += 1
     try:
-        return await asyncio.get_running_loop().run_in_executor(_REVIEW_POOL, _review_and_record, uid, p, data)
+        # run_in_executor 不带上下文变量：不包一层，评阅里的模型调用就不知道算在谁头上（budget.py）
+        ctx = contextvars.copy_context()
+        return await asyncio.get_running_loop().run_in_executor(_REVIEW_POOL, ctx.run, _review_and_record, uid, p, data)
     finally:
         _review_pending -= 1
 

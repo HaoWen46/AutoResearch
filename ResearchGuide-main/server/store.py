@@ -248,6 +248,14 @@ CREATE TABLE IF NOT EXISTS wechat_tickets (
 );
 CREATE INDEX IF NOT EXISTS idx_wechat_code ON wechat_tickets(code);
 
+-- 模型调用次数：每天每人一行，全站合计记在 user_id='*' 那一行（budget.py）
+CREATE TABLE IF NOT EXISTS llm_usage (
+  day TEXT NOT NULL,
+  user_id TEXT NOT NULL,
+  calls INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (day, user_id)
+);
+
 -- 删掉的账号留一个 id（随机串，不是个人信息）：触发器据此拒绝再往任何表里写这个人的行。
 -- 删号那一刻还在跑的请求（比如等模型回话的对话）完成后会写库；没有它，删掉的数据会被重新写回来。
 CREATE TABLE IF NOT EXISTS deleted_users (
@@ -468,6 +476,25 @@ def wechat_use_ticket(ticket: str) -> bool:
         cur = c.execute("UPDATE wechat_tickets SET used=1 WHERE ticket_hash=? AND used=0 AND openid IS NOT NULL",
                         (_token_hash(ticket),))
     return cur.rowcount == 1
+
+
+def llm_calls(day: str, uid: str) -> int:
+    with _conn() as c:
+        row = c.execute("SELECT calls FROM llm_usage WHERE day=? AND user_id=?", (day, uid)).fetchone()
+    return row["calls"] if row else 0
+
+
+def llm_charge(day: str, uid: str, user_cap: int, total_cap: int) -> bool:
+    """查额度和扣一笔在同一个事务里：并发的两个请求不会都看到「还剩一次」然后都调。"""
+    with _LOCK, _conn() as c:
+        rows = {r["user_id"]: r["calls"] for r in
+                c.execute("SELECT user_id, calls FROM llm_usage WHERE day=? AND user_id IN (?, '*')", (day, uid))}
+        if rows.get(uid, 0) >= user_cap or rows.get("*", 0) >= total_cap:
+            return False
+        for who in (uid, "*"):
+            c.execute("INSERT INTO llm_usage(day, user_id, calls) VALUES(?,?,1)"
+                      " ON CONFLICT(day, user_id) DO UPDATE SET calls=calls+1", (day, who))
+    return True
 
 
 def _user_tables(c: sqlite3.Connection) -> list[str]:

@@ -279,14 +279,26 @@ def scan(text: str) -> Scan:
 
 def kinds_at(sc: Scan, start: int, end: int, kinds: frozenset[str]) -> set[str]:
     """这一处（start..end）落在哪几种范围里。提示词本身在这一处里面的不算（「不确定性量化」里的「不」）。"""
+    end = min(max(end, start + 1), len(sc.text))
+    if end <= start:
+        return set()
     lo, hi = bisect.bisect_left(sc.cue_starts, start), bisect.bisect_left(sc.cue_starts, end)
-    cues = [c for c in (sc.scopes[i] for i in sc.by_cue[lo:hi]) if c.cue_end <= end]
+    # 提示词在这一处里面的范围按种类记成差分，逐位减掉：原来每个位置都把这些范围数一遍，整句引文里提示词多时是平方级（Codex 复现）
+    inner: dict[str, list[int]] = {}
+    for c in (sc.scopes[i] for i in sc.by_cue[lo:hi]):
+        if c.cue_end <= end and c.kind in kinds and c.end > start and c.start < end:
+            d = inner.setdefault(c.kind, [0] * (end - start + 1))
+            d[max(c.start, start) - start] += 1
+            d[min(c.end, end) - start] -= 1
     out = set()
-    for p in range(start, min(max(end, start + 1), len(sc.text))):
-        for k in kinds - out:
-            n = sc.cover[k][p]
-            if n and n > sum(1 for c in cues if c.kind == k and c.start <= p < c.end):
+    for k in kinds:
+        cov, d, run = sc.cover[k], inner.get(k), 0
+        for p in range(start, end):
+            if d is not None:
+                run += d[p - start]
+            if cov[p] > run:
                 out.add(k)
+                break
     return out
 
 
@@ -329,7 +341,7 @@ _EN_STAGE = r"undergrad(?:uate)?|ph\.?d\.?|doctoral|master'?s|masters|graduate|g
 # （正则, 阶段：固定值或取自第几组, 年份所在组）
 _GRADE_FORMS: tuple[tuple[re.Pattern, Any, int | None], ...] = (
     (re.compile(r"(?<![最很较更太超扩放增加伟强远广宏盛重巨庞北])大[ \t]?(" + _Y + ")" + _NOT_COUNT), "本科", 1),
-    (re.compile(r"(?<![钻科考保读攻])研[ \t]?(" + _Y + ")" + _NOT_COUNT), "硕士", 1),
+    (re.compile(r"(?<![钻科考保攻])研[ \t]?(" + _Y + ")(?!年)" + _NOT_COUNT), "硕士", 1),  # 「读研二」是年级（Codex 复现），「读研一年」不是
     (re.compile(r"硕[ \t]?(" + _Y + ")" + _NOT_COUNT), "硕士", 1),
     (re.compile(r"(?<![赌])博[ \t]?(" + _Y + ")" + _NOT_COUNT), "博士", 1),
     (re.compile(r"(?<![提升身最很较更太增拔])高[ \t]?(" + _Y + ")" + _NOT_COUNT), "高中", 1),

@@ -439,7 +439,7 @@ _QTY_KEYS = {"age": ("age", "岁"), "enroll_year": ("calyear", "年"), "pace": (
 _ENTITY_KEYS = ("school", "department", "major")
 _SPAN_KEYS = ("interest", "goal", "field")
 # 值外面包着的「对…感兴趣」「想学…」不是值本身：「对机器学习感兴趣」按「机器学习」去原话里找
-_FRAMING = re.compile(r"^(?:我)?(?:对于?|想学|想做|想试试|想往|想走|喜欢|关注|关心|希望)?(.+?)(?:感兴趣|有兴趣|很感兴趣|方向|领域|相关)?$")
+_FRAMING = re.compile(r"^(?:我)?(?:对于?|想学|想做|想试试|想往|想走|喜欢|关注|关心|希望)?(.+?)(?:感兴趣|有兴趣|很感兴趣|方向|领域|相关)?$", re.S)
 _PER_CN = {"w": "周", "d": "天", "mo": "月", "y": "年", "term": "学期"}
 # 年龄、每周时间说的是现在（「我打算每周投入九小时」不算，Codex 复现）；入学年份本来就是过去的事（「我去年2025年入学」，Codex 复现）
 _QTY_SCOPES = {"enroll_year": evidence.STATE - {evidence.PAST}}
@@ -560,7 +560,7 @@ def _qty_reason(key: str, q: evidence.Qty, ctx: _Ctx, strict: bool) -> str | Non
     if strict and key == "enroll_year":  # 旧的字符串值照旧只比数
         hits = [h for h in hits if h.label in ("级", "届") or _ENROLL_WORDS.search(_qty_clause(ctx, h))]
     if strict and key == "pace":  # 「课余」「课后」不是课
-        hits = [h for h in hits if not _NOT_FREE_TIME.search(re.sub(r"课[余外后间]", "", _qty_clause(ctx, h)))]
+        hits = [h for h in hits if not _NOT_FREE_TIME.search(re.sub(r"课[余外后间题]", "", _qty_clause(ctx, h)))]  # 「课题组」不是课（Codex 复现）
     if not hits:
         return "number_not_in_evidence"
     sc = evidence.scan(ctx.text)
@@ -583,18 +583,19 @@ def _scope_mismatch(key: str, value: str, ctx: _Ctx) -> bool:
     kinds = evidence.STATE - ({evidence.IRREALIS} if key.split(":")[0] in _TEXT_WISH else set())
     sc = evidence.scan(ctx.text)
     if evidence.has_negation(value) and not evidence.has_negation(ctx.quote) \
-            and not any(evidence.NEG in evidence.kinds_at(sc, a, a + ctx.windows.length, kinds) for a in ctx.windows.starts):
+            and not any(evidence.kinds_at(sc, a, a + ctx.windows.length, frozenset({evidence.NEG})) for a in ctx.windows.starts):
         return True
     vt = evidence.prep(value)
-    vs = evidence.scan(vt)
     verdicts = []
-    # 缩写也要换着找：「我不喜欢AI」撑不住「人工智能」（Codex 复现）
-    for a in {a for form in evidence.span_forms(value) for a in evidence.anchors(form, ctx.quote, min_len=2)}:
+    # 缩写也要换着找：「我不喜欢AI」撑不住「人工智能」（Codex 复现）；片段在值里的说法按换过缩写的那一版找，
+    # 原来在原值里找「ml」找不到，「不会机器学习」的否定就丢了（Codex 复现）
+    pairs = {(a, form) for form in evidence.span_forms(value) for a in evidence.anchors(form, ctx.quote, min_len=2)}
+    for a, form in sorted(pairs):
         occ = [o for o in evidence.span_occurrences(a, ctx.text) if _inside(ctx, *o)]
         if not occ:
             continue
-        own = evidence._find(vt, a)
-        v = evidence.kinds_at(vs, *own[0], kinds) if own else set()
+        own = evidence._find(form, a)
+        v = evidence.kinds_at(evidence.scan(form), *own[0], kinds) if own else set()
         if _PERFECTIVE.search(vt):  # 「学过高等数学」本来就是说以前的事，原话里的「以前」不算不一致（Codex 复现）
             v = v | {evidence.PAST}
         ok = any(not (q - v) and (evidence.NEG in q) == (evidence.NEG in v)
@@ -659,7 +660,8 @@ def _typed_value(key: str, value: Any, ctx: _Ctx) -> tuple | None | object:
         # 不是原话：值里得有原话的一大段（四个字以上的中文或一个英文词）当锚，锚说的是现在；收下也只算我们推的
         anchors = [o for a in evidence.anchors(text, ctx.quote) for o in evidence.span_occurrences(a, ctx.text)]
         ratio = support_ratio(text, ctx.quote)
-        if not anchors or ratio < _SUPPORT_FLOOR or _words_missing(text, ctx) or _extra_claims(_FRAMING.match(text).group(1), ctx):
+        # 值里带换行时原来 _FRAMING 匹配不上、.group 抛异常，整轮对话中断（Codex 复现）
+        if not anchors or ratio < _SUPPORT_FLOOR or _words_missing(text, ctx) or _extra_claims(core.group(1) if core else text, ctx):
             return text, "short_value_not_in_evidence"
         if not _numbers_supported(text, ctx.quote):  # 「每周读5篇」不能借「每周读2篇机器学习论文」的锚混进来（Codex 复现）
             return text, "number_not_in_evidence"

@@ -315,3 +315,24 @@ def test_corrections_and_repeated_quotes_stay_linear(n):
         ("interest:ml", "机器学习"), ("base:code", "会Python"), ("current:x", "在修线性代数课程的作业"), ("age", Q(19, "岁")))]
     memory.validate_ops(store.create_user("t")["uid"], ops, [nat])
     assert time.perf_counter() - t0 < 3.0
+
+
+@pytest.mark.parametrize("key,value,message,ok", [
+    ("interest:ml", "机器学习\n方向", "我对机器学习有兴趣", True),            # 值里带换行原来整轮抛异常（Codex 复现）
+    ("base:code", "不会机器学习", "我不会ML", True),                         # 换过缩写的片段丢了值里的否定（Codex 复现）
+    ("pace", Q(10, "小时", "周"), "我每周能在课题组投入10小时", True),        # 「课题组」不是课（Codex 复现）
+    ("pace", Q(10, "小时", "周"), "每周有10小时做科研课题", True),
+    ("grade", "研二", "我现在读研二", True),                                 # 「读」后面的研二原来认不出（Codex 复现）
+    ("grade", G("硕士", 3), "在读研三", True),
+    ("grade", G("硕士", 1), "读研一年就工作", False),
+])
+def test_review_round20(key, value, message, ok):
+    acc, rej = _check_in(key, value, message)
+    assert (len(acc) == 1) is ok, rej
+
+
+def test_a_negated_value_against_a_long_quote_stays_linear():
+    """值有否定、引文没有：原来按整段引文逐位重数提示词，一万六千字的引文要六秒（Codex 复现）。"""
+    t0 = time.perf_counter()
+    _check_in("base:math", "不会数学", "以前学过数学。" * 4000)
+    assert time.perf_counter() - t0 < 2.0

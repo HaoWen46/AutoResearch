@@ -451,7 +451,6 @@ _TEXT_LOOSE = ("base", "capability", "direction")
 _FILLER_WORDS = re.compile(r"研究|兴趣|方向|领域|相关|应用|方面|内容|正在|在做|在修|在上|目前|现在|这学期|本学期|已经|还|很|比较|主要|大概|一些|一点|"
                            r"最多|至少|不到|以上|以内|左右|大约|约|只有|只能")
 # 入学年份要连着入学说（「2021年我参加了竞赛」不是入学，Codex 复现）；每周时间不能是上课、通勤这类占掉的时间（Codex 复现）
-_ENROLL_WORDS = re.compile(r"入学|入校|进校|考入|考进|入读|进的|来的|报到|来北大|进北大|上大学|级|届|(?<![a-z])(?:enrolled|entered|class of)(?![a-z])")
 _NOT_FREE_TIME = re.compile(r"课|体育|通勤|睡|上班|兼职|打工|家教|坐车")
 # 数量字符串里除了这个量只许有这些：「19岁，计算机基础扎实」不是一个年龄（Codex 复现）
 _QTY_FILLER = re.compile(r"(?:每[ \t]?个?(?:周|星期|礼拜|天|日|月|年|学期)|[一1][ \t]?个?(?:周|星期|礼拜|天|月)|今年|周岁|虚岁|入学|入校|级|届|约|大约|大概|"
@@ -474,9 +473,9 @@ def _context(quote: str, pool: list[str] | None = None) -> _Ctx:
     for msg in reversed(pool or []):
         t = evidence.prep(msg)
         wins, i = [], t.find(q) if q else -1
-        while i != -1:
+        while i != -1 and len(wins) < 64:  # 不重叠地找、最多 64 处：原来逐位找重叠的长引文，几万字是平方级（Codex 复现）
             wins.append((i, i + len(q)))
-            i = t.find(q, i + 1)
+            i = t.find(q, i + max(1, len(q)))
         if wins:
             return _Ctx(t, evidence.Windows(tuple(a for a, _ in wins), len(q)), quote)
     return _Ctx(q, evidence.Windows((0,), len(q)), quote)
@@ -506,7 +505,7 @@ def _num(x: Any) -> float | None:
     return n if math.isfinite(n) and abs(n) < 1e7 else None
 
 
-def _parse_qty(key: str, value: Any) -> tuple[evidence.Qty, str] | None | object:
+def _parse_qty(key: str, value: Any) -> tuple[evidence.Qty, str, bool] | str | None | object:
     """{value, unit, per} 或者一段写着数的字符串 →（这个量, 存库的写法）。字符串里没有数 → None（按普通文字核对）；
     字典形状不对、或者字符串不只是一个这种量（「19岁，已发表论文」「五周」「3」门课）→ BAD 或拒。
     字典先拼成「每周10小时」再交给同一个解析，免得两套单位规则。"""
@@ -545,22 +544,24 @@ def _parse_qty(key: str, value: Any) -> tuple[evidence.Qty, str] | None | object
     if q.dim != dim or (key == "enroll_year" and q.lo != q.hi):
         return evidence.BAD if isinstance(value, dict) else "number_not_in_evidence"
     if not isinstance(value, dict):
-        return q, text
+        # 带单位的字符串和结构化的值一样严格比：原来「每周7小时」绕过了上下限、per 和入学关系的检查（Codex 复现）；光一个数照旧只比数
+        return q, text, bool(qs[0].dim)
     span = evidence.dec(q.lo) + (f"到{evidence.dec(q.hi)}" if q.hi != q.lo else "")  # 范围两头都留（原来只存低的那头，Codex 复现）
-    return q, {"age": f"{span}岁", "enroll_year": span}.get(key, text)
-
-
-def _qty_clause(ctx: _Ctx, h: evidence.Qty) -> str:
-    a, b = evidence.scan(ctx.text).clause(h.start)
-    return ctx.text[a:b]
+    return q, {"age": f"{span}岁", "enroll_year": span}.get(key, text), True
 
 
 def _qty_reason(key: str, q: evidence.Qty, ctx: _Ctx, strict: bool) -> str | None:
     hits = [h for h in evidence.quantities(ctx.text) if _inside(ctx, h.start, h.end) and evidence.qty_match(q, h, strict=strict)]
-    if strict and key == "enroll_year":  # 旧的字符串值照旧只比数
-        hits = [h for h in hits if h.label in ("级", "届") or _ENROLL_WORDS.search(_qty_clause(ctx, h))]
-    if strict and key == "pace":  # 「课余」「课后」不是课
-        hits = [h for h in hits if not _NOT_FREE_TIME.search(re.sub(r"课[余外后间题]", "", _qty_clause(ctx, h)))]  # 「课题组」不是课（Codex 复现）
+    if strict and key == "enroll_year":  # 年份后面紧跟着入学：「2024年入学」「24年进的北大」「2025年我来北大报到」
+        hits = [h for h in hits if h.label in ("级", "届") or evidence._ENROLL_AFTER.match(ctx.text, h.end)
+                or re.search(r"入学[^，。,；;]{0,6}$", ctx.text[max(0, h.start - 8):h.start])]  # 「入学年份2023」「入学那会是两千零二十三年」
+    if strict and key == "pace":  # 「课余」「课后」「课题组」不是课（Codex 复现）；同一分句只看一次
+        sc, busy = evidence.scan(ctx.text), {}
+        for h in hits:
+            a, b = sc.clause(h.start)
+            if a not in busy:
+                busy[a] = bool(_NOT_FREE_TIME.search(re.sub(r"课[余外后间题]", "", ctx.text[a:b])))
+        hits = [h for h in hits if not busy[sc.clause(h.start)[0]]]
     if not hits:
         return "number_not_in_evidence"
     sc = evidence.scan(ctx.text)
@@ -600,13 +601,13 @@ def _scope_mismatch(key: str, value: str, ctx: _Ctx) -> bool:
             v = v | {evidence.PAST}
         ok = any(not (q - v) and (evidence.NEG in q) == (evidence.NEG in v)
                  for q in (evidence.kinds_at(sc, s, e, kinds) for s, e in occ))
-        if not ok and a.isascii():
+        if not ok and (a.isascii() or len(a) >= 3):  # 三个字以上的片段对不上就算：「线性代数和实分析都学过」里的「实分析」（Codex 复现）
             return True
         verdicts.append(not ok)
     return bool(verdicts) and all(verdicts)
 
 
-_PERFECTIVE = re.compile(r"[学修做用写上读看]过|曾经|曾")
+_PERFECTIVE = re.compile(r"(?:接触|参加|学|修|做|用|写|上|读|看|碰|练|跑)过|曾经|曾|完成了|做完了?|学完了?|写完了?")
 
 
 def _extra_claims(value: str, ctx: _Ctx) -> bool:
@@ -645,8 +646,8 @@ def _typed_value(key: str, value: Any, ctx: _Ctx) -> tuple | None | object:
             return parsed
         if isinstance(parsed, str):
             return str(value), parsed
-        q, shown = parsed
-        return shown, _qty_reason(key, q, ctx, strict=isinstance(value, dict))
+        q, shown, strict = parsed
+        return shown, _qty_reason(key, q, ctx, strict=strict)
     text = str(value).strip()
     if kind == "entity":
         return text, _occurrence_reason(evidence.entity_occurrences(key, text, ctx.text, ctx.windows), ctx, evidence.STATE)

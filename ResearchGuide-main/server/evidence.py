@@ -59,11 +59,14 @@ _NOW = re.compile(r"现在|目前|如今|(?<![a-z])now(?![a-z])")
 # 下一分句以并列词开头，否定接着管：「我不喜欢数据库、网络，或者操作系统」（Codex 复现）
 _CONT = re.compile(r"[ \t]*(?:或者|或是|还有|以及|也不|和|与|及|跟|或|(?<![a-z])(?:or|and|nor)(?![a-z]))")
 
-NEG, PAST, IRREALIS, COND, CORRECTED, OTHER = "neg", "past", "irrealis", "cond", "corrected", "other"
+NEG, PAST, IRREALIS, COND, CORRECTED, OTHER, QUESTION, MENTION, ASIDE = "neg", "past", "irrealis", "cond", "corrected", "other", "question", "mention", "aside"
 # 说的是不是他「现在的状态」：年级、学校院系、年龄和每周时间六样都不沾；
 # 兴趣和目标本来就是「想」，打算可以，但不能是否定、过去、假设（「假如我喜欢…」）、改口、别人的事
-STATE = frozenset({NEG, PAST, IRREALIS, COND, CORRECTED, OTHER})
-WISH = frozenset({NEG, PAST, COND, CORRECTED, OTHER})
+# 只是提到（「是讲座的题目」「这个词」）不算自述；顺带提到（「看开发大模型应用的教程」「班长给我发了通知」）也不是他现在的状态，
+# 但兴趣可以从看教程来，所以兴趣目标不查顺带提到
+STATE = frozenset({NEG, PAST, IRREALIS, COND, CORRECTED, OTHER, QUESTION, MENTION, ASIDE})
+WISH = frozenset({NEG, PAST, COND, CORRECTED, OTHER, QUESTION, MENTION})
+KINDS = tuple(sorted(STATE))
 
 _EN_NEG = r"(?<![a-z])(?:not|no|never|neither|nor|without|except|cannot)(?![a-z])|n['’]t(?![a-z])"
 _NEG_FWD = re.compile(r"不再是|并不是|也不是|并非|不是|不算|算不上|谈不上|称不上|从来没有|从来没|从没有|从没|从未|未曾|毫无|很难|难以|没有|没|不|除了|除去|而非|"
@@ -78,10 +81,10 @@ _NEG_DOUBLE = re.compile(r"(?:不是|并非|并不是|没有|不能|不会|不�
 _NEG_COPULA = ("不是", "并不是", "并非", "不再是")
 _COORD = re.compile(r"也|又|还|、|和|或|及")
 # 后置的否定：「对机器学习没有兴趣」「Python 我没学过😂」——在分句末尾（后面只剩语气词、表情）时往前管，管到这一分句开头或最近的「对」
-_NEG_BACK = re.compile(r"(?:没有?|毫无|不太?|不是很|不怎么|不算|并不|一点都不|一点也不|都不|也不)(?:什么|太大|多大|啥|太多|很大|这个|那个)?"
-                       r"(?:兴趣|感兴趣|喜欢|想学|想做|想碰|想搞|考虑|打算|会|懂|熟|熟悉|了解|学过|碰过|接触过|用过|写过|做过|好|行|擅长|在行|熟练|扎实|精通|"
+_NEG_BACK = re.compile(r"(?:没有?|毫无|不太?|不是很|不怎么|不算|谈不上|算不上|并不|一点都不|一点也不|都不|也不)(?:什么|太大|多大|啥|太多|很大|这个|那个)?"
+                       r"(?:有?兴趣|感兴趣|喜欢|想学|想做|想碰|想搞|考虑|打算|会|懂|熟|熟悉|了解|学过|碰过|接触过|用过|写过|做过|好|行|擅长|在行|熟练|扎实|精通|"
                        r"在上|上过|修过|选上|在修|在做)"
-                       r"|(?:兴趣|好感)(?:都|也)?(?:没有?|不大)|无感|没感觉|不感冒|算了|一窍不通|(?:拿|挤|抽|腾)不出(?:来)?|做不到|达不到|不够")
+                       r"|(?:兴趣|好感)(?:都|也)?(?:没有?|不大)|无感|没感觉|不感冒|算了|一窍不通|(?:拿|挤|抽|腾)不出(?:来)?|做不到|达不到|不够|没(?:决定|想好|确定)(?:要不要[^，。,.!?！？\s]{0,2})?")
 # 这几种不用在分句末尾：「金融学并不是我的专业，我只是选过一门课」（Codex 复现）
 _NEG_BACK_ANY = re.compile(r"(?:并不是|不是|并非)(?:我的)?(?:专业|学校|方向|兴趣|目标|菜|院系|学院|领域)")
 _TAIL = re.compile(r"(?:[了啊吧呢的呀哈过吗嘛啦哦耶~～…]|[^\w])*")
@@ -89,13 +92,34 @@ _PAST = re.compile(r"以前|之前|原来|原本|本来|去年|前年|曾经|当
                    r"(?<![a-z])(?:used to|last year|previously|formerly|back then|was|were)(?![a-z])")
 _PAST_PSEUDO = re.compile(r"本来就|原来如此|原来是这样")
 # 说一样东西是别人的意思：「毕业读博是别人给的建议」（Codex 复现）
-_OTHER_BACK = re.compile(r"是?(?:别人|家里|父母|爸妈|老师|导师|学长|学姐|室友|同学)(?:给|提|说|定|要求)?的(?:建议|想法|意见|要求|安排|期望|主意)")
+_PEOPLE = r"(?:室友|舍友|同学|朋友|学姐|学长|学弟|学妹|师兄|师姐|师弟|师妹|姐姐|哥哥|弟弟|妹妹|别人|老师|爸妈|父母|家里)"
+_OTHER_BACK = re.compile(r"是?(?:别人|家里|父母|爸妈|老师|导师|学长|学姐|室友|同学)(?:给|提|说|定|要求)?的(?:建议|想法|意见|要求|安排|期望|主意)"
+                         r"|的?是(?:我的?)?" + _PEOPLE + r"|属于(?:我的?)?" + _PEOPLE + r"|替" + _PEOPLE + r"问的?"
+                         r"|" + _PEOPLE + r"(?:替我|帮我|给我)(?:填|定|选|报|安排|规划)的?"
+                         # 修饰别人的：「大四的学长」「23岁的师兄」「元培的同学」「18岁人群」（Codex 复现）
+                         r"|的(?:学长|学姐|学弟|学妹|师兄|师姐|师弟|师妹|同学|朋友|室友|老师|侄子|小侄子|孩子)|的?(?:人群|群体)")
 # 说一样东西「是过去的」：往前管到分句开头（「人工智能是我去年的兴趣」「大二已经是过去的事了」，Codex 复现）
 _PAST_BACK = re.compile(r"(?:去年|以前|之前|过去|曾经|小时候|高中)的(?:兴趣|事|爱好|专业|学校|方向|想法|目标|梦想)|过去的事|过去式|已经结课|结课了|全忘了|都忘了|"
                         r"已经交了|提前交了")
 _IRREALIS = re.compile(r"(?<![思理感联回猜幻梦构妄])想(?!法)|打算|准备|计划|希望|将来|以后|未来|毕业后|等我|等到|明年|下学期|下个学期|争取|考虑|申请|报考|"
                        r"考研|保研|(?<![a-z])(?:want|wants|plan|plans|hope|hopes|going to|will|would|apply|applying)(?![a-z])")
 _COND = re.compile(r"如果|假如|要是|万一|假设|若是|倘若|假使|(?<![a-z])(?:if|suppose|supposing)(?![a-z])")
+# 只是理想、得等以后：「每周五小时只是理想状态」「这个额度得等期中考完才有」（Codex 复现）
+_COND_BACK = re.compile(r"(?:只是|仅仅是)(?:理想|想象|设想|假设|计划|愿望)(?:状态|情况)?|(?:得|要)等[^，。,]{0,10}才(?:有|行|能)")
+# 只是提到：「是今天讲座的题目」「是群公告里的要求」「这个词」「看…的教程」「班长给我发了通知」（Codex 复现）
+_MENTION_BACK = re.compile(r"(?:只)?是[^，。,；;]{0,10}的?(?:题目|标题|栏目|要求|名字|通知|公告)|这个词")
+_ASIDE_BACK = re.compile(r"的(?:教程|视频|入门指南|指南|海报|课件|简介)|(?:给我|让我|叫我|帮我|找我|发给我)")
+_MENTION_FWD = re.compile(r"(?:标题|题目)(?:是|写着)|论坛里见到|目录里有")
+# 条件句的后件也是假设：「如果拿到奖学金，我才会考虑出国留学」（Codex 复现）
+_CONSEQ = re.compile(r"[ \t]*(?:那么|那就|那我|那|我才|我就|我再|我也|就|才|则)")
+# 「想先说明一下」「想问」是在说话，不是打算（Codex 复现）
+_IRREALIS_PSEUDO = re.compile(r"想(?:先)?(?:说明|说|问|确认|告诉|补充|提一下|了解一下|请教)")
+# 他自己又出来当主语，「别人的事」就到这儿：「室友大二而我大三」（Codex 复现）。「希望我」「让我」里的「我」是宾语，不算
+_SELF = re.compile(r"(?<![望让叫要帮给说得议荐诉劝替跟和比像带对])(?:而|但|可|不过)?(?:我|本人)(?=自己|本人|则|就|才|也|呢|其实|确实|真的|的确|的话|这边|现在|今年|是|在|读|念|想|对|喜欢|"
+                   r"大[一二三四五六]|研[一二三]|博[一二三四五六]|已经|属于|学|修|做|准备|打算|决定|还|刚|每周|[0-9一二三四五六七八九十]+岁)")
+_SENT_END = re.compile(r"[。！？!?\n；;]|\.(?!\d)")
+# 问句里自我介绍的那一段照样是自述：「我这个大四还能…吗」「心院这边的我能…吗」「作为大二学生…？」（Codex 复现）
+_SELF_NP = re.compile(r"(?:我这个|我一个|作为|身为|像我这样的?|我们这种)[^，。,？?]{0,12}?(?=的人|的我|还|能|可以|适合|该|要|想|，|,|$)|[^，。,？?]{1,10}这边的我|[^，。,？?]{1,10}的我")
 # 说的是别人：「我室友大二」「我妈妈希望我读博」「同组的学长会写 Python」（Codex 复现）。
 # 「跟室友一起」「在张老师组里」「跟着导师」是他自己的事，不算
 _OTHER = re.compile(r"室友|舍友|同学|同桌|朋友|闺蜜|学长|学姐|学弟|学妹|师兄|师姐|师弟|师妹|老师|导师|教授|助教|辅导员|爸爸|妈妈|我爸|我妈|父母|家长|"
@@ -104,10 +128,12 @@ _OTHER = re.compile(r"室友|舍友|同学|同桌|朋友|闺蜜|学长|学姐|�
 _OTHER_NOT = re.compile(r"组|课题组|实验室|的组|那边|那里|门下|一起")
 # 改口：「大二，哦打错了我是大三」「我大二。等下。说错了，我大三」。「打错」这类在哪都算；「不对」「错了」只在分句开头算（「作业错了三题」不是改口）。
 # 改口词前面只有语气词、「刚才」「年龄」这类，就往回越过「等下」「抱歉」这种插话，管到上一句实话（Codex 复现）
-_CORR_ANY = re.compile(r"打错|说错|写错|输错|口误|笔误|更正|纠正一下|(?<![a-z])(?:i meant|typo|correction)(?![a-z])")
+_CORR_ANY = re.compile(r"打错|说错|写错|输错|口误|笔误|更正|纠正一下|那句(?:话)?(?:是|说的是)|(?<![a-z])(?:i meant|typo|correction)(?![a-z])")
+# 往后管的改口：「蛋糕上误写了20岁」（Codex 复现）
+_CORR_FWD = re.compile(r"误写了?|误报了?|错写成|写错成|错报成|报错成")
 _CORR_HEAD = re.compile(r"(?:不对|错了|说反了|sorry)(?=$|[我是应其啊吧呢哦嗯 \t])")
 _CORR_PREFIX = re.compile(r"(?:[哦噢啊呃嗯额哎诶唉 \t]|我|刚才|刚刚|刚|之前|前面|上面|抱歉|不好意思|sorry|年龄|年级|学校|专业|院系|时间|数字|名字|那个|这个)*")
-_FILLER = re.compile(r"(?:[哦噢啊呃嗯额哎诶唉 \t!！]|等下|等一下|等等|停一下|稍等|抱歉|不好意思|sorry|wait|hmm)*")
+_FILLER = re.compile(r"(?:[哦噢啊呃嗯额哎诶唉 \t!！]|等下|等一下|等会儿?|等等|停一下|稍等|抱歉|不好意思|sorry|wait|hmm)*")
 
 
 class Scope(NamedTuple):
@@ -234,14 +260,45 @@ def scan(text: str) -> Scan:
         scopes.append(Scope(clauses[clause_idx(m.start())][0], m.start(), OTHER, m.start(), m.end()))
     for m in _PAST_BACK.finditer(t):
         scopes.append(Scope(clauses[clause_idx(m.start())][0], m.start(), PAST, m.start(), m.end()))
-    for rx, kind in ((_IRREALIS, IRREALIS), (_COND, COND)):
-        for m in rx.finditer(t):
-            scopes.append(Scope(m.end(), fwd_end(m.end(), kind), kind, m.start(), m.end()))
+    for m in _IRREALIS.finditer(t):
+        if not _IRREALIS_PSEUDO.match(t, m.start()):
+            scopes.append(Scope(m.end(), fwd_end(m.end(), IRREALIS), IRREALIS, m.start(), m.end()))
+    for m in _COND.finditer(t):
+        k = clause_idx(m.end())
+        end = clauses[k + 1][1] if k + 1 < n and _CONSEQ.match(t, clauses[k + 1][0]) else clauses[k][1]
+        scopes.append(Scope(m.end(), end, COND, m.start(), m.end()))
+    # 别人的事管到句末或他自己又当主语的地方，中间隔着逗号也接着管（「我室友很闲，每周能抽四小时」，Codex 复现）；
+    # 「我和同学都喜欢」「我跟隔壁的朋友同属物院」是一起，不算（Codex 复现）
+    sent_ends = [m.start() for m in _SENT_END.finditer(t)]
+    selves = [m.start() for m in _SELF.finditer(t)]
     for m in _OTHER.finditer(t):
         s, e = m.span()
-        if t[s - 1:s] in ("和", "跟", "与", "同", "在", "给") or t[s - 2:s] == "跟着" or _OTHER_NOT.match(t, e):
+        a = clauses[clause_idx(s)][0]
+        if t[s - 1:s] in ("和", "跟", "与", "同", "在", "给") or t[s - 2:s] == "跟着" or _OTHER_NOT.match(t, e) \
+                or re.search(r"我[ \t]?(?:和|跟|与|同)[^，。！？,!?]{0,8}$", t[max(a, s - 12):s]):
             continue
-        scopes.append(Scope(e, clauses[clause_idx(e)][1], OTHER, s, e))
+        i, j = bisect.bisect_left(sent_ends, e), bisect.bisect_left(selves, e)
+        scopes.append(Scope(e, min(sent_ends[i] if i < len(sent_ends) else len(t), selves[j] if j < len(selves) else len(t)), OTHER, s, e))
+    for m in _COND_BACK.finditer(t):
+        scopes.append(Scope(clauses[clause_idx(m.start())][0], m.start(), COND, m.start(), m.end()))
+    for rx, kind in ((_MENTION_BACK, MENTION), (_ASIDE_BACK, ASIDE)):
+        for m in rx.finditer(t):
+            scopes.append(Scope(clauses[clause_idx(m.start())][0], m.start(), kind, m.start(), m.end()))
+    for m in _MENTION_FWD.finditer(t):
+        scopes.append(Scope(m.end(), clauses[clause_idx(m.end())][1], MENTION, m.start(), m.end()))
+    for m in _CORR_FWD.finditer(t):
+        scopes.append(Scope(m.end(), clauses[clause_idx(m.end())][1], CORRECTED, m.start(), m.end()))
+    # 问句里的说法不是自述：「大二可以去听研究生的讨论课吗？」「复旦大学能申请旁听吗？」（Codex 复现）
+    for k, (a, b) in enumerate(clauses):
+        tail = t[b:clauses[k + 1][0]] if k + 1 < n else ""
+        if re.search(r"[?？]", tail) or re.search(r"(?:吗|呢|什么|怎么样?)[ \t]*$", t[max(a, b - 4):b]):
+            p = a
+            for m in _SELF_NP.finditer(t, a, b):
+                if m.start() > p:
+                    scopes.append(Scope(p, m.start(), QUESTION, b, b))
+                p = max(p, m.end())
+            if p < b:
+                scopes.append(Scope(p, b, QUESTION, b, b))
 
     filler = [bool(_FILLER.fullmatch(t, a, b)) for a, b in clauses]
     prefix_end = [_CORR_PREFIX.match(t, a, b).end() for a, b in clauses]  # 每句只算一次：原来每个改口词都从句首重扫一遍，平方级（Codex 复现）
@@ -262,7 +319,7 @@ def scan(text: str) -> Scan:
         scopes.append(Scope(a, m.start(), CORRECTED, m.start(), m.end()))
 
     cover: dict[str, list[int]] = {}
-    for kind in (NEG, PAST, IRREALIS, COND, CORRECTED, OTHER):
+    for kind in KINDS:
         diff = [0] * (len(t) + 1)
         for sc in scopes:
             if sc.kind == kind and sc.end > sc.start:
@@ -509,9 +566,9 @@ _EN_TENS = r"(?:twenty|thirty|forty|fifty|sixty)[ \t-](?:one|two|three|four|five
 _TOKEN = re.compile(r"半(?=[ \t]?(?:个[ \t]?)?(?:小时|钟头|天|年|月|学期|周|星期))|\d{1,9}(?:\.\d{1,4})?|[零〇一二两三四五六七八九十百千万几]{1,12}(?:点[零〇一二三四五六七八九]{1,4})?"
                     r"|(?<![a-z])(?:" + _EN_TENS + "|" + "|".join(_EN_NUM) + r")(?![a-z])")
 # 上下限不是定值：「每周不到五小时」撑不住「每周5小时」（Codex 复现）
-_BOUND_BEFORE = re.compile(r"(?:不到|不足|少于|低于|最多|至多|顶多|不超过|小于|最少|至少|超过|多于|大于|不少于)[ \t]?$")
+_BOUND_BEFORE = re.compile(r"(?:不到|不足|少于|低于|最多|至多|顶多|不超过|小于|最少|至少|超过|多于|大于|不少于|上限|下限)[ \t]?$")
 _BOUND_AFTER = re.compile(r"[ \t]?(?:以内|以下|之内|以上|出头|多一点|开外)")
-_ENROLL_AFTER = re.compile(r"[ \t]?(?:入学|入校|毕业|出生|级|届)")
+_ENROLL_AFTER = re.compile(r"[ \t]?(?:秋季|9月|九月)?[ \t]?我?(?:是)?(?:入学|入校|进校|考入|考进|入读|进的|进了|来的|报到|来北大|进北大|上大学|毕业|出生|级|届)")
 _RANGE = re.compile(r"[ \t]?(?:到|至|~|～|-|—|–|或)[ \t]?")
 _MOD = re.compile(r"[ \t]?(多|来|余)?(个)?(多)?(半)?[ \t]?")
 _JOIN = re.compile(r"[ \t]?(?:零|又)?[ \t]?")
@@ -847,9 +904,15 @@ def _find(t: str, form: str) -> list[tuple[int, int]]:
 _AMBIGUOUS = {"法院"}
 # 学校的附属机构不是学籍：「北大附中」「清华大学出版社」（Codex 复现）
 _SCHOOL_NOT = re.compile(r"附中|附小|附属|出版社|医院|校友")
-# 学校院系专业要跟学籍连着说：分句里（这个名字以外）得有「是、在、读、学、专业、的」这类词；「借了本经济学教材」只是提到（Codex 复现）
-_MEMBER = re.compile(r"是|在|读|念|就读|属于|隶属|来自|主修|辅修|学|专业|系|院|本科|硕士|博士|研究生|学生|大[一二三四五六]|研[一二三]|入学|毕业|交换|转|级|届|的"
-                     r"|(?<![a-z])(?:i'm|i am|at|from|study|studying|major|student|in)(?![a-z])")
+# 学校院系专业要作为学籍说出来（Codex 复现：「借了本经济学教材」「物院门口」「北大邮箱」「信科招助理吗」都只是提到）：
+# 名字前面紧挨着「是、在、读、属于、同属…」，或者后面紧跟「大二、学生、在读、专业、的。」，或者整句就是这个名字（回答「哪个院的」）
+_MEMBER_PRE = re.compile(r"(?:是|在|读|念|就读|属于|同属|隶属|来自|主修|辅修|学|考上|考进|考入|进了?|转到|转入|转去|就在)[了的]?[ \t:：]*$"
+                         r"|(?:专业|学校|院系|学院|本科专业)(?:是|定了|写|填|就是|叫|名)?[ \t:：]*$|我这个|作为|身为"
+                         r"|(?<![a-z])(?:i'm at|i am at|i study at|study at|studying at|from|major in|majoring in)[ \t]*$")
+_MEMBER_POST = re.compile(r"是我(?:的|们)?(?:现在的|本科的?|目前的)?(?:专业|学校|院系|学院|系)|这边的我|的我|(?:专业|系)?(?:的?(?:学生|本科生|研究生|博士生|人)|大[一二三四五六]|研[一二三]|博[一二三四五六]|[0-9]{2,4}级|级|届|在读|读书|念书|上学|本科|硕士|博士)"
+                          r"|(?:专业|系)?的?[ \t~～…!！。.]*$")
+_MEMBER_NOT = re.compile(r"[ \t]?(?:附近|门口|旁边|对面|周边|门外|楼下|出版|发的|发了|招|附中|附小|附属|医院|校友|选过|上过|旁听|蹭|(?:专业)?的(?:作业|同学|书|课程)|教材|邮箱|课程)")
+_BARE = re.compile(r"[ \t~～…!！。.啊呀吧呢哈嗯哦]*")
 
 
 @lru_cache(maxsize=1)
@@ -889,10 +952,14 @@ def entity_occurrences(key: str, value: str, quote: str, windows: Windows | None
                 continue
             if key == "department" and f in _SUBJECTS and not t.startswith(_DEPT_SUFFIX, e):
                 continue
-            if _covered(t, s, e, longer):
+            # 「法学院」里的「法学」只按「法学院」算（学科词后面跟的是院名，不是学籍说法）
+            if _covered(t, s, e, longer) or (f in _SUBJECTS and _covered(t, s, e, [x for x in forms if len(x) > len(f) and f in x])):
                 continue
             a, b = sc.clause(s)
-            if _MEMBER.search(t, a, s) or _MEMBER.search(t, e, b):
+            if _MEMBER_NOT.match(t, e) or (t.startswith("大学", e) and _MEMBER_NOT.match(t, e + 2)):
+                continue
+            bare = _BARE.fullmatch(t, a, s) and _MEMBER_POST.fullmatch(t, e, b)
+            if bare or _MEMBER_PRE.search(t, max(a, s - 8), s) or (_MEMBER_POST.match(t, e, b) and _MEMBER_POST.match(t, e, b).end() > e):
                 out.append((s, e))
     return out
 

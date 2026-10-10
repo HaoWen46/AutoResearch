@@ -438,6 +438,12 @@ _SPAN_KEYS = ("interest", "goal", "field")
 # 值外面包着的「对…感兴趣」「想学…」不是值本身：「对机器学习感兴趣」按「机器学习」去原话里找
 _FRAMING = re.compile(r"^(?:我)?(?:对于?|想学|想做|想试试|想往|想走|喜欢|关注|关心|希望)?(.+?)(?:感兴趣|有兴趣|很感兴趣|方向|领域|相关)?$")
 _PER_CN = {"w": "周", "d": "天", "mo": "月", "y": "年", "term": "学期"}
+# 入学年份本来就是过去的事：「我去年2025年入学」不能因为「去年」拒掉（Codex 复现）；年龄、每周时间说的是现在
+_QTY_SCOPES = {"enroll_year": frozenset({evidence.NEG, evidence.CORRECTED})}
+# 数量字符串里除了这个量只许有这些：「19岁，计算机基础扎实」不是一个年龄，原来只核了 19 就把整串按自述存下（Codex 复现）
+_QTY_FILLER = re.compile(r"(?:每[ \t]?个?(?:周|星期|礼拜|天|日|月|年|学期)|[一1][ \t]?个?(?:周|星期|礼拜|天|月)|今年|周岁|虚岁|入学|入校|级|届|约|大约|大概|"
+                         r"左右|差不多|上下|以上|以内|至少|最多|不到|多|能|可以|投入|学习|时间|per|a|an|week|day|month|weekly|daily|about|"
+                         r"around|roughly|hours?|[\s,，。.;；~～:：/])*")
 _UNIT_SHOWN = {u: "小时" for u in ("h", "hr", "hrs", "hour", "hours", "钟头", "钟")} | \
               {u: "分钟" for u in ("min", "mins", "minute", "minutes", "分")} | {"周岁": "岁", "years old": "岁", "year old": "岁"}
 
@@ -457,7 +463,7 @@ def _num(x: Any) -> float | None:
         return None
     try:
         n = float(x)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):  # 10**400 是合法 JSON，原来 float() 抛出来整轮校验中断（Codex 复现）
         return None
     return n if math.isfinite(n) and abs(n) < 1e7 else None
 
@@ -490,6 +496,9 @@ def _parse_qty(key: str, value: Any) -> tuple[evidence.Qty, str] | None | object
     if not qs:
         return evidence.BAD if isinstance(value, dict) else None
     q = qs[0]
+    t = evidence.prep(text)
+    if len(qs) == 1 and not _QTY_FILLER.fullmatch(t[:q.start] + " " + t[q.end:]):
+        return None  # 夹着别的内容：按普通文字核对（支撑度、数字）
     if not q.dim and not isinstance(value, dict):  # 字符串里光一个数（「19」）：照旧只比数，原话里有同一个数就行
         return (q, shown) if len(qs) == 1 else None
     if not q.dim:  # 光一个数：按这个字段本来的单位（年龄 20 = 20 岁，入学 24 = 2024 年）
@@ -500,16 +509,20 @@ def _parse_qty(key: str, value: Any) -> tuple[evidence.Qty, str] | None | object
     if len(qs) != 1 or q.dim != dim:
         return evidence.BAD if isinstance(value, dict) else None
     if isinstance(value, dict):
-        shown = {"age": f"{evidence.dec(q.lo)}岁", "enroll_year": evidence.dec(q.lo)}.get(key, shown)
+        if key == "enroll_year" and q.lo != q.hi:
+            return evidence.BAD
+        span = evidence.dec(q.lo) + (f"到{evidence.dec(q.hi)}" if q.hi != q.lo else "")  # 范围两头都留（原来只存低的那头，Codex 复现）
+        shown = {"age": f"{span}岁", "enroll_year": span}.get(key, shown)
     return q, shown
 
 
-def _qty_reason(q: evidence.Qty, quote: str) -> str | None:
+def _qty_reason(key: str, q: evidence.Qty, quote: str) -> str | None:
     sc = evidence.scan(evidence.prep(quote))
     hits = [h for h in evidence.quantities(quote) if evidence.qty_match(q, h, strict=bool(q.dim))]
     if not hits:
         return "number_not_in_evidence"
-    return None if any(evidence.is_current(sc, h.start, h.end, evidence.WISH) for h in hits) else "negated_in_evidence"
+    kinds = _QTY_SCOPES.get(key, evidence.WISH)
+    return None if any(evidence.is_current(sc, h.start, h.end, kinds) for h in hits) else "negated_in_evidence"
 
 
 def _occurrence_reason(occ: list[tuple[int, int]], quote: str, kinds: frozenset[str]) -> str | None:
@@ -527,7 +540,8 @@ def _negated_only(value: str, quote: str) -> bool:
     sc = evidence.scan(evidence.prep(quote))
     kinds = frozenset({evidence.NEG, evidence.CORRECTED})
     verdicts = []
-    for a in evidence.anchors(value, quote, min_len=2):
+    # 缩写也要换着找：「我不喜欢AI」撑不住「人工智能」（原来只按字面找片段，没找到就当没被否定，Codex 复现）
+    for a in {a for form in evidence.span_forms(value) for a in evidence.anchors(form, quote, min_len=2)}:
         occ = evidence.span_occurrences(a, quote)
         if occ:
             negated = not any(evidence.affirmed(sc, s, e, kinds) for s, e in occ)
@@ -556,7 +570,7 @@ def _typed_value(key: str, value: Any, quote: str) -> tuple | None | object:
         if parsed is None or parsed is evidence.BAD:
             return parsed
         q, shown = parsed
-        return shown, _qty_reason(q, quote)
+        return shown, _qty_reason(key, q, quote)
     text = str(value).strip()
     if kind == "entity":
         return text, _occurrence_reason(evidence.entity_occurrences(key, text, quote), quote, evidence.STATE)
@@ -572,6 +586,8 @@ def _typed_value(key: str, value: Any, quote: str) -> tuple | None | object:
         ratio = support_ratio(text, quote)
         if not anchors or ratio < _SUPPORT_FLOOR:
             return text, "short_value_not_in_evidence"
+        if not _numbers_supported(text, quote):  # 「每周读5篇」不能借「每周读2篇机器学习论文」的锚混进来（Codex 复现）
+            return text, "number_not_in_evidence"
         return text, _occurrence_reason(anchors, quote, evidence.WISH), min(ratio, _SUPPORT_OK - 0.001)
     return None
 

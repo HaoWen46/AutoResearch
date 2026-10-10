@@ -106,8 +106,8 @@ def _clause_at(clauses: list[tuple[int, int]], starts: list[int], pos: int) -> i
     return max(0, bisect.bisect_right(starts, pos) - 1)
 
 
-def _neg_cues(t: str) -> list[tuple[int, int]]:
-    """真的否定词（去掉看着像的、A不A 问句、双重否定）。"""
+def _neg_cues(t: str) -> tuple[list[tuple[int, int]], set[int]]:
+    """真的否定词（去掉看着像的、A不A 问句、双重否定），和双重否定里被抵掉的那个否定词的起点。"""
     cues, cancelled = [], set()
     for m in _NEG_FWD.finditer(t):
         s, e = m.span()
@@ -119,7 +119,7 @@ def _neg_cues(t: str) -> list[tuple[int, int]]:
             cancelled.add(d.end() - 1)
             continue
         cues.append((s, e))
-    return cues
+    return cues, cancelled
 
 
 @lru_cache(maxsize=32)  # 同一轮几条 op 共用一句原话；每条要存几个和原话一样长的数组，别多存
@@ -143,7 +143,7 @@ def scan(text: str) -> Scan:
                 end = des[k]
         return end
 
-    neg = _neg_cues(t)
+    neg, cancelled = _neg_cues(t)
     neg_starts = [s for s, _ in neg]
     dead = set()
     for i, (s, e) in enumerate(neg):  # 外层「不是」里面又有否定、中间不是并列 → 两个都不算
@@ -153,7 +153,8 @@ def scan(text: str) -> Scan:
         j = bisect.bisect_left(neg_starts, e)
         if j < len(neg) and neg[j][0] < end and not _COORD.search(t, e, neg[j][0]):
             dead.update((i, j))
-    dead_at = {p for i in dead for p in range(*neg[i])}
+    # 抵掉的否定词也不能被后置否定再认一遍：「我对机器学习不是不感兴趣」里的「不感兴趣」（Codex 复现）
+    dead_at = {p for i in dead for p in range(*neg[i])} | cancelled
     for i, (s, e) in enumerate(neg):
         if i not in dead:
             scopes.append(Scope(e, fwd_end(e, True), NEG, s, e))
@@ -220,7 +221,7 @@ def is_current(sc: Scan, start: int, end: int, kinds: frozenset[str] = STATE) ->
 
 def has_negation(text: str) -> bool:
     t = prep(text)
-    return bool(_neg_cues(t) or _NEG_BACK.search(t))
+    return bool(_neg_cues(t)[0] or _NEG_BACK.search(t))
 
 
 # ---------- 年级：固定的表 ----------
@@ -238,7 +239,7 @@ _YEAR_OF = {c: i + 1 for i, c in enumerate("一二三四五六")} | {str(i): i f
            {w: i + 1 for i, w in enumerate(("first", "second", "third", "fourth", "fifth", "sixth"))} | \
            {w: i + 1 for i, w in enumerate(("1st", "2nd", "3rd", "4th", "5th", "6th"))}
 _Y = "[一二三四五六1-6]"
-_NOT_COUNT = r"(?![0-9.个门项次篇倍月天周小分万千百十点些统])"  # 「大2个」「大一点」不是年级
+_NOT_COUNT = r"(?![0-9]|\.[0-9]|[个门项次篇倍月天周小分万千百十点些统])"  # 「大2个」「大一点」「大2.5」不是年级；句号照常（「我是大二.」，Codex 复现）
 _EN_STAGE = r"undergrad(?:uate)?|ph\.?d\.?|doctoral|master'?s|masters|graduate|grad|college|university"
 # （正则, 阶段：固定值或取自第几组, 年份所在组）
 _GRADE_FORMS: tuple[tuple[re.Pattern, Any, int | None], ...] = (
@@ -647,15 +648,24 @@ def _dept_of(v: str) -> str | None:
     return hit[0] if len(hit) == 1 else None
 
 
+def _variants(name: str) -> set[str]:
+    plain = re.sub(r"[（(][^）)]*[）)]", "", name).strip()
+    out = {name.strip(), plain}
+    return {x.strip() for x in out | {x.replace("专业", "") for x in out} if len(x.strip()) >= 2}
+
+
 def _major_names(v: str) -> set[str]:
+    """同一个专业的叫法。卡片名里空格隔开的是几个不同的专业（「国际政治专业 … 外交学专业」），各算各的：
+    原来整张卡的检索别名都当同一个，「我是外交学专业的」撑住了「国际政治」（Codex 复现）。"""
     import curriculum
     names: set[str] = set()
     for c in curriculum.cards():
-        ns = {n for n in (c.get("专业", ""), c.get("目录专业名", ""), *c.get("检索别名", [])) if n}
-        ns |= {n.replace("专业", "") for n in ns}
-        if v in ns or v + "专业" in ns:
-            names |= ns
-    return {n for n in names if len(n) >= 2}
+        for n in (c.get("专业", ""), c.get("目录专业名", ""), *c.get("检索别名", [])):
+            for piece in str(n or "").split():
+                forms = _variants(piece)
+                if v in forms or v + "专业" in forms:
+                    names |= forms
+    return names
 
 
 def entity_forms(key: str, value: str) -> tuple[str | None, set[str]]:

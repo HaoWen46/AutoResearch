@@ -176,3 +176,34 @@ def test_the_gate_stays_linear_on_long_messages(text):
     t0 = time.perf_counter()
     memory.validate_ops(store.create_user("t")["uid"], ops, [text])
     assert time.perf_counter() - t0 < 2.0
+
+
+@pytest.mark.parametrize("key,value,quote,ok", [
+    ("age", "19岁，计算机基础扎实，擅长深度学习", "我今年19岁", False),    # 只核了 19，整串按自述存下（Codex 复现）
+    ("pace", "每周能投入约十小时", "每周能投入约十小时", True),
+    ("direction:ai", "人工智能", "我不喜欢AI", False),                      # 否定检查没换缩写找（Codex 复现）
+    ("goal:papers", "每周读5篇机器学习论文", "我想每周读2篇机器学习论文", False),  # 锚住了就不查数字（Codex 复现）
+    ("major", "国际政治", "我是外交学专业的", False),                      # 一张卡上的两个专业被当成一个（Codex 复现）
+    ("major", "外交学", "我是外交学专业的", True),
+    ("enroll_year", "2025", "我去年2025年入学", True),                     # 入学年份本来就是过去的事（Codex 复现）
+    ("interest:ml", "机器学习", "我对机器学习不是不感兴趣", True),          # 抵掉的否定又被后置否定认了一遍（Codex 复现）
+    ("grade", "大二", "我是大二.", True),                                  # 句号被当成小数点（Codex 复现）
+    ("grade", {"stage": "本科", "year": 2}, "我是大二.", True),
+])
+def test_review_round18(key, value, quote, ok):
+    acc, rej = _check(key, value, quote)
+    assert (len(acc) == 1) is ok, rej
+
+
+def test_an_oversized_structured_number_rejects_only_that_op():
+    """10**400 是合法 JSON：原来 float() 抛 OverflowError，整轮校验中断（Codex 复现）。"""
+    acc, rej = _check("age", {"value": 10 ** 400, "unit": "岁"}, "我今年19岁")
+    assert acc == [] and rej[0]["reason"] == "bad_type:value"
+
+
+def test_an_age_range_keeps_both_ends():
+    """{"value": [19, 20]} 两头都核对了，原来只存「19岁」（Codex 复现）。"""
+    acc, _ = _check("age", {"value": [19, 20], "unit": "岁"}, "我19到20岁")
+    assert acc[0]["value"] == "19到20岁"
+    acc, rej = _check("enroll_year", {"value": [2023, 2024], "unit": "年"}, "2023到2024年入学")
+    assert acc == [] and rej[0]["reason"] == "bad_type:value"

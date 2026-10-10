@@ -239,6 +239,18 @@ _PROPOSAL_RULES = """【本轮要你输出什么】
    - 大部分撑不住 → **直接拒**。别把别的轮次的内容、你自己的评价塞进 value。
    value 里不要写你的判断（「基础扎实」「能力偏弱」），只写他说了什么。
 
+   下面这几种字段，value 按固定的形状写，代码拿它去原话里逐项核对（对不上就拒）：
+   - `grade`：`{"stage": "本科|硕士|博士|高中", "year": 1-6}`。原话没说第几年 year 填 null；
+     只说「二年级」「second-year」没说阶段，stage 填 null（或本科）。被否定的、以前的、打算的（「想读研」）、说错又改口的不写。
+   - `age`：`{"value": 19, "unit": "岁"}`；`enroll_year`：`{"value": 2024, "unit": "年"}`（「24级」写 2024）；
+     `pace`：`{"value": 10, "unit": "小时", "per": "周"}`（per 填 周/天/月，原话没说就填 null；范围写 `[3, 5]`）。
+     数和单位要和原话那一处对得上：「两个半小时」是 2.5 小时，「一小时二十分钟」是 80 分钟，别把周数、门数当小时。
+   - `school` / `department` / `major`：写名字（院系用环境包里库内认出的规范名），原话里得出现这个名字或它的常见简称
+     （北大、信管、数院）。他说的是「想去」「以前在」「不是」的学校院系，不写。
+   - `interest:*` / `goal:*` / `field:*`：value **直接抄原话里那几个字**（最短、能说清是什么的那段，如「机器学习」「读博」），
+     常见缩写（AI/人工智能、ML/机器学习、读研/读研究生）算同一个。否定的（「不想碰」「没兴趣」「除了X」）、以前的不写。
+   其余字段 value 照旧写一句话，里面的数字也得是原话里的数。
+
 2. `affects`：**这条记忆改变你未来的哪个决策**。只能从这几个里挑：
    task_difficulty（任务难度）｜task_kind（任务类型）｜direction_choice（方向建议）｜
    question_next（下一轮问什么）｜course_pick（课程推荐）｜pace（推进节奏）｜feedback（反馈方式）。
@@ -251,7 +263,7 @@ _PROPOSAL_RULES = """【本轮要你输出什么】
   这类漏了最伤：十分钟会被当成永久设定，之后每次建议都按「他很闲」来给。
 - **改口**：他推翻自己说过的（「其实我不是…」「我刚才说错了」）→
   `replace` 或 `retract`，把旧的撤掉。只删不写会留下两条互相矛盾的记忆。
-- **身份**：年级、院系、专业 → `grade` / `department` / `major`，affects=task_difficulty。
+- **身份**：年级、院系、专业 → `grade`（写成 {stage, year}）/ `department` / `major`，affects=task_difficulty。
   他自报的是简称（「信管」「数院」）就按环境包里库内认出的规范名称写（`department`=信息管理系）。
   `school` **只有在他说出北大以外的学校时才写**（默认北大，不用记也不用问）。
 - **当前实践**：在上的课、在做的项目、卡在哪 → `current:<slug>`。
@@ -397,7 +409,7 @@ def _proposal_system() -> str:
     "corrections": [{{"targets_fact_id": "f_xxx", "why": "为什么这是纠正"}}]
   }},
   "memory_ops": [
-    {{"op": "add|replace|retract|support", "key": "...", "value": "...",
+    {{"op": "add|replace|retract|support", "key": "...", "value": "一句话；grade/age/enroll_year/pace 写成上面说的对象",
       "evidence_quote": "必须是用户原话里逐字存在的片段",
       "affects": "task_difficulty|task_kind|direction_choice|question_next|course_pick|pace|feedback",
       "target_fact_id": "replace/retract/support 时必填",

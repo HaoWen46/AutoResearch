@@ -11,10 +11,10 @@ from __future__ import annotations
 
 import math
 import re
-import unicodedata
 from datetime import datetime, timedelta, timezone
 from typing import Any, NamedTuple
 
+import evidence
 import store
 import transcript
 from schemas import DECISION_STATUSES, UserFact, now_iso
@@ -424,217 +424,200 @@ def support_ratio(value: str, quote: str) -> float:
     return len(v & _content_chars(quote)) / len(v)
 
 
-# 年级的说法：「大二」「本科二年级」「sophomore」是同一个（本科, 2）；「博士」是（博士, 不知第几年）。
-# 阶段词后面的空白放进可选组里：写成「(阶段)?\s*」时，一长串空格每个位置都要把后面的空格吃完再吐回来，
-# 两万个空格要二十秒（自己压测出来的）
-_GRADE_RE = re.compile(r"(?:(本科|硕士|研究生|博士|高中|大学)\s*)?(?:([大研硕博高])\s*([一二三四五六1-6])(?![0-9])|第([一二三四五六1-6])\s*年(?![代份])"
-                       r"|(?<![0-9])([一二三四五六1-6])\s*年级)|(本科|硕士|研究生|博士|高中)")
-_GRADE_STAGE = {"本科": "本", "大学": "本", "大": "本", "硕士": "硕", "研究生": "硕", "研": "硕", "硕": "硕",
-                "博士": "博", "博": "博", "高中": "高", "高": "高"}
-_GRADE_YEAR = {c: i + 1 for i, c in enumerate("一二三四五六")} | {str(i): i for i in range(1, 7)}
-_GRADE_EN = {"freshman": ("本", 1), "sophomore": ("本", 2), "junior": ("本", 3), "senior": ("本", 4),
-             "undergrad": ("本", None), "undergraduate": ("本", None), "master": ("硕", None),
-             "masters": ("硕", None), "phd": ("博", None)}
-_EN_ORD = {"first": 1, "1st": 1, "second": 2, "2nd": 2, "third": 3, "3rd": 3, "fourth": 4, "4th": 4, "fifth": 5, "5th": 5}
-_EN_YEAR = re.compile(r"\b(first|second|third|fourth|fifth|[1-5](?:st|nd|rd|th))[\s-]*year\b|\byear\s*([1-6])\b")
-# 前面紧跟这些的年级不算现在的：否定（不是、不算）和过去（以前是、去年读）。「以前是大一，现在大二」只有大二
-_NEGATED = re.compile(r"(?:不是|不再是|并非|非|没在|不在|不算|算不上|(?:以前|之前|原来|去年|曾经|前年)(?:是|读|在读|上|念)?)\s*$")
-# 后面紧跟这些的是说错了、改口：「大二，哦打错了我是大三」只有大三
-_CORRECTED = re.compile(r"^[\s，,。.!！…~～]*(?:哦|啊|呃|嗯|额)?[\s，,]*(?:打错|说错|写错|口误|不对|错了)")
-# 阶段词后直接跟年份、省了「第」：「我本科二年，北大的」（Codex 第十五轮）；没有阶段词的「三年」还是不算
-_GRADE_STAGE_YEAR = re.compile(r"(本科|大学|研究生|硕士|博士)\s*([一二三四五六1-6])\s*年(?![代份级里内中制间期来])")
+# ---------- 按字段核对：模型给结构化的值，代码去原话里对（evidence.py） ----------
+# 原来是一串字面启发式（年级正则、否定窗口、数字正则），审了十七轮还在补：「不想碰」「not a graduate student」
+# 「我没学过Python」→「会」「北京大学」撑「清华大学」都能混过去。现在每种字段一个确定的核对办法：
+#   grade        {stage, year}：原话里按固定的表认出同一个（阶段, 第几年），说的是现在；
+#   age/enroll_year/pace  {value, unit, per}：原话里有同一个数、同一量纲的单位（小时和分钟、年和月可以换算）；
+#   school/department/major：库里的名字或简称在原话里出现、说的是现在；
+#   interest/goal/field：值就是原话的一段（或常见缩写），不在否定、过去、改口里；
+#   其余字段（direction 的值常是库里的方向名，不一定是原话）：照旧按支撑度，另外查数字和否定。
+_QTY_KEYS = {"age": ("age", "岁"), "enroll_year": ("calyear", "年"), "pace": ("clock", "小时")}
+_ENTITY_KEYS = ("school", "department", "major")
+_SPAN_KEYS = ("interest", "goal", "field")
+# 值外面包着的「对…感兴趣」「想学…」不是值本身：「对机器学习感兴趣」按「机器学习」去原话里找
+_FRAMING = re.compile(r"^(?:我)?(?:对于?|想学|想做|想试试|想往|想走|喜欢|关注|关心|希望)?(.+?)(?:感兴趣|有兴趣|很感兴趣|方向|领域|相关)?$")
+_PER_CN = {"w": "周", "d": "天", "mo": "月", "y": "年", "term": "学期"}
+_UNIT_SHOWN = {u: "小时" for u in ("h", "hr", "hrs", "hour", "hours", "钟头", "钟")} | \
+              {u: "分钟" for u in ("min", "mins", "minute", "minutes", "分")} | {"周岁": "岁", "years old": "岁", "year old": "岁"}
 
 
+def _kind(key: str) -> str:
+    if key == "grade":
+        return "grade"
+    if key in _QTY_KEYS:
+        return "quantity"
+    if key in _ENTITY_KEYS:
+        return "entity"
+    return "span" if ":" in key and key.split(":")[0] in _SPAN_KEYS else "text"
+
+
+def _num(x: Any) -> float | None:
+    if isinstance(x, bool):
+        return None
+    try:
+        n = float(x)
+    except (TypeError, ValueError):
+        return None
+    return n if math.isfinite(n) and abs(n) < 1e7 else None
+
+
+def _parse_qty(key: str, value: Any) -> tuple[evidence.Qty, str] | None | object:
+    """{value, unit, per} 或者一段写着数的字符串 →（这个量, 存库的写法）。字符串里没有数 → None（按普通文字核对）；字典形状不对 → BAD。
+    字典先拼成「每周10小时」再交给同一个解析，免得两套单位规则。"""
+    dim, unit0 = _QTY_KEYS[key]
+    if isinstance(value, dict):
+        if not value or set(value) - {"value", "unit", "per"}:
+            return evidence.BAD
+        n, unit, per = value.get("value"), value.get("unit") or unit0, value.get("per")
+        lo, hi = (n[0], n[1]) if isinstance(n, list) and len(n) == 2 else (n, n)
+        lo, hi = _num(lo), _num(hi)
+        if lo is None or hi is None or not isinstance(unit, str) or not isinstance(per, (str, type(None))):
+            return evidence.BAD
+        unit = re.sub(r"^个", "", evidence.prep(unit).strip())
+        unit = _UNIT_SHOWN.get(unit, unit)
+        per_code = ""
+        if per:
+            p = evidence.prep(per).strip().removeprefix("每").removeprefix("per ").strip()
+            per_code = p if p in _PER_CN else evidence._PER_WORD.get(p, "")
+            if not per_code:
+                return evidence.BAD
+        text = (f"每{_PER_CN[per_code]}" if per_code else "") + evidence.dec(lo) + (f"到{evidence.dec(hi)}" if hi != lo else "") + unit
+        shown = text
+    else:
+        text = shown = str(value or "").strip()
+    qs = evidence.quantities(text)
+    if not qs:
+        return evidence.BAD if isinstance(value, dict) else None
+    q = qs[0]
+    if not q.dim and not isinstance(value, dict):  # 字符串里光一个数（「19」）：照旧只比数，原话里有同一个数就行
+        return (q, shown) if len(qs) == 1 else None
+    if not q.dim:  # 光一个数：按这个字段本来的单位（年龄 20 = 20 岁，入学 24 = 2024 年）
+        lo, hi = q.lo, q.hi
+        if dim == "calyear" and lo < 100:
+            lo, hi = lo + 2000, hi + 2000
+        q = q._replace(dim=dim, lo=lo, hi=hi, base_lo=lo * (60 if dim == "clock" else 1), base_hi=hi * (60 if dim == "clock" else 1))
+    if len(qs) != 1 or q.dim != dim:
+        return evidence.BAD if isinstance(value, dict) else None
+    if isinstance(value, dict):
+        shown = {"age": f"{evidence.dec(q.lo)}岁", "enroll_year": evidence.dec(q.lo)}.get(key, shown)
+    return q, shown
+
+
+def _qty_reason(q: evidence.Qty, quote: str) -> str | None:
+    sc = evidence.scan(evidence.prep(quote))
+    hits = [h for h in evidence.quantities(quote) if evidence.qty_match(q, h, strict=bool(q.dim))]
+    if not hits:
+        return "number_not_in_evidence"
+    return None if any(evidence.is_current(sc, h.start, h.end, evidence.WISH) for h in hits) else "negated_in_evidence"
+
+
+def _occurrence_reason(occ: list[tuple[int, int]], quote: str, kinds: frozenset[str]) -> str | None:
+    if not occ:
+        return "short_value_not_in_evidence"
+    sc = evidence.scan(evidence.prep(quote))
+    return None if any(evidence.is_current(sc, s, e, kinds) for s, e in occ) else "negated_in_evidence"
+
+
+def _negated_only(value: str, quote: str) -> bool:
+    """值本身没有否定，它和原话共有的片段却都在否定或改口里：「我没学过Python」撑不住「会Python」，「数学不太好」撑不住「数学很好」。
+    英文词（Python、PyTorch）是具体的东西，单个被否定也算；中文片段要全被否定才算（「不能超过两小时」里的「小时」不代表整条被否定）。"""
+    if evidence.has_negation(value):
+        return False
+    sc = evidence.scan(evidence.prep(quote))
+    kinds = frozenset({evidence.NEG, evidence.CORRECTED})
+    verdicts = []
+    for a in evidence.anchors(value, quote, min_len=2):
+        occ = evidence.span_occurrences(a, quote)
+        if occ:
+            negated = not any(evidence.affirmed(sc, s, e, kinds) for s, e in occ)
+            if negated and a.isascii():
+                return True
+            verdicts.append(negated)
+    return bool(verdicts) and all(verdicts)
+
+
+def _typed_value(key: str, value: Any, quote: str) -> tuple | None | object:
+    """结构化字段的核对：（存库的值, 拒绝理由或 None[, 只撑住一部分时的支撑度]）。
+    不是结构化字段、或者字符串里认不出结构 → None；字典形状不对 → BAD。"""
+    kind = _kind(key)
+    if kind == "grade":
+        g = evidence.parse_grade(value)
+        if g is evidence.BAD:
+            return g
+        if g is None:  # 「本科二年级，GPA4.0」：年级后面夹带了别的，整条不收
+            return str(value), "grade_not_in_evidence"
+        shown = evidence.render_grade(*g) if isinstance(value, dict) else str(value).strip()
+        return shown, (None if evidence.grade_supported(g[0], g[1], quote) else "grade_not_in_evidence")
+    if isinstance(value, dict) and kind != "quantity":
+        return evidence.BAD
+    if kind == "quantity":
+        parsed = _parse_qty(key, value)
+        if parsed is None or parsed is evidence.BAD:
+            return parsed
+        q, shown = parsed
+        return shown, _qty_reason(q, quote)
+    text = str(value).strip()
+    if kind == "entity":
+        return text, _occurrence_reason(evidence.entity_occurrences(key, text, quote), quote, evidence.STATE)
+    if kind == "span":
+        occ = evidence.span_occurrences(text, quote)
+        core = _FRAMING.match(text.strip())
+        if not occ and core and core.group(1) != text.strip():
+            occ = evidence.span_occurrences(core.group(1), quote)
+        if occ:
+            return text, _occurrence_reason(occ, quote, evidence.WISH)
+        # 不是原话：值里得有原话的一大段（四个字以上的中文或一个英文词）当锚，锚说的是现在；收下也只算我们推的
+        anchors = [o for a in evidence.anchors(text, quote) for o in evidence.span_occurrences(a, quote)]
+        ratio = support_ratio(text, quote)
+        if not anchors or ratio < _SUPPORT_FLOOR:
+            return text, "short_value_not_in_evidence"
+        return text, _occurrence_reason(anchors, quote, evidence.WISH), min(ratio, _SUPPORT_OK - 0.001)
+    return None
+
+
+# 下面几个是老接口，测试和调用方还在用，都落到 evidence 上
 def _grades_in(text: str) -> list[tuple[str | None, int | None]]:
-    """文本里提到的、说的是现在的年级（阶段, 第几年）。被否定的、过去的、紧接着改口的不算。
-    「第N年」要有「第」：「学 Python 三年了」「一年内读完」不是年级（Codex 第十四轮复现）。"""
-    text = unicodedata.normalize("NFKC", text or "")
-    out = []
-    for m in _GRADE_RE.finditer(text):
-        if _NEGATED.search(text[max(0, m.start() - 6):m.start()]) or _CORRECTED.search(text[m.end():m.end() + 10]):
-            continue
-        word, prefix, year, year2, year3, alone = m.groups()
-        stage = _GRADE_STAGE.get(word or prefix or alone or "")
-        out.append((stage, _GRADE_YEAR.get(year or year2 or year3 or "")))
-    for m in _GRADE_STAGE_YEAR.finditer(text):
-        if not (_NEGATED.search(text[max(0, m.start() - 6):m.start()]) or _CORRECTED.search(text[m.end():m.end() + 10])):
-            out.append((_GRADE_STAGE.get(m.group(1)), _GRADE_YEAR.get(m.group(2))))
-    low = text.lower()
-
-    def negated(start: int) -> bool:
-        return bool(_NEGATED.search(text[max(0, start - 6):start]) or re.search(r"\bnot\s+(?:a\s+|an\s+)?(?:[a-z-]+\s+)?$", low[max(0, start - 30):start]))
-
-    covered = []
-    for m in _EN_YEAR.finditer(low):
-        n = _EN_ORD.get(m.group(1) or "") or (int(m.group(2)) if m.group(2) else None)
-        # 只看紧跟在 year 后面的阶段词：原来往后看 24 个字，「I am not first-year, I am a sophomore」的 sophomore 被吞掉（Codex 复现）
-        sm = re.match(r"[\s-]*((?:undergrad(?:uate)?|phd|ph\.d\.?|doctoral|master'?s?|graduate|grad|college)\b(?:\s+(?:graduate|student))?)?", low[m.end():])
-        words = sm.group(1) or ""
-        covered.append((m.start(), m.end() + sm.end()))
-        if n and not negated(m.start()):
-            stage = ("博" if re.search(r"phd|ph\.d|doctoral", words) else  # 博士优先：「PhD graduate student」是博士不是硕士
-                     "本" if ("undergrad" in words or "college" in words) else
-                     "硕" if re.search(r"master|graduate|grad", words) else None)
-            out.append((stage, n))
-    for m in re.finditer(r"[a-z']+", low):
-        hit = _GRADE_EN.get(m.group().replace("'", ""))
-        if hit and not negated(m.start()) and not any(a <= m.start() < b for a, b in covered):
-            out.append(hit)
-    return out
-
-
-# 常见缩写和全称算同一个：学生说「想试试 AI」，模型记「人工智能」不算编
-_ALIASES = {"ai": "人工智能", "ml": "机器学习", "nlp": "自然语言处理", "cv": "计算机视觉", "cs": "计算机",
-            "rl": "强化学习", "dl": "深度学习", "llm": "大模型", "hci": "人机交互", "econ": "经济学"}
-
-
-def _with_aliases(text: str) -> str:
-    low = (text or "").lower()
-    extra = [full for a, full in _ALIASES.items() if re.search(rf"(?<![a-z]){a}(?![a-z])", low)]
-    extra += [a for a, full in _ALIASES.items() if full in low]
-    return low + " " + " ".join(extra)
-
-
-_CN_DIGIT = {"零": 0, "一": 1, "二": 2, "两": 2, "三": 3, "四": 4, "五": 5, "六": 6, "七": 7, "八": 8, "九": 9}
-
-
-def _cn_number(run: str) -> int | None:
-    """「二十」「二十五」「十二」「三」「一百」这类小于一千的中文数；认不出返回 None。"""
-    total, cur = 0, 0
-    for ch in run:
-        if ch in _CN_DIGIT:
-            cur = _CN_DIGIT[ch]
-        elif ch == "十":
-            total += (cur or 1) * 10
-            cur = 0
-        elif ch == "百":
-            total += (cur or 1) * 100
-            cur = 0
-        else:
-            return None
-    return total + cur
-
-
-# 数量连着单位比：「每周2小时，总共20周」撑不住「每周20小时」——20 在原话里是周数（Codex 第十四轮复现）
-_UNITS = {"小时": "h", "h": "h", "hr": "h", "hrs": "h", "hour": "h", "hours": "h", "个小时": "h", "钟头": "h",
-          "分钟": "min", "min": "min", "mins": "min", "分": "min", "秒": "s", "天": "d", "日": "d", "周": "w", "星期": "w",
-          "个月": "mo", "月": "mo", "年": "y", "岁": "age", "学分": "cr", "门": "门", "个": "个", "次": "次", "篇": "篇",
-          "项": "项", "人": "人", "倍": "x", "%": "%", "级": "lv", "期": "期", "章": "章", "节": "节", "页": "页", "题": "题"}
-_COUNTERS = {"个", "项", "门", "篇", "次", "期", "章", "节", "页", "题", "人"}
-_UNIT_RE = "|".join(sorted(map(re.escape, _UNITS), key=len, reverse=True))
-_NUM = r"(\d{1,9}(?:\.\d{1,4})?|[零一二两三四五六七八九十百]+)"
-_QTY = re.compile(_NUM + r"(?:\s*(?:到|至|~|-|—|或)\s*" + _NUM + r")?\s*(" + _UNIT_RE + r")?", re.IGNORECASE)
-
-
-_VULGAR = re.compile(r"(?:(\d{1,6})\s*)?([¼½¾⅐⅑⅒⅓⅔⅕⅖⅗⅘⅙⅚⅛⅜⅝⅞])")  # 空白只跟在数字后面：「(数)?\s*」在长串空白上会平方级回溯
-
-
-def _dec(x: float) -> str:
-    return f"{x:.4f}".rstrip("0").rstrip(".")  # 最多四位小数：正好是数的正则能整段吃下的长度
-
-
-def _fractions(text: str) -> str:
-    """「½」「1½」「⅓」先整体算成小数（「1½」是 1.5）：原来 NFKC 把「1½」拼成「11⁄2」读成 5.5、⅓ 的循环小数被拆成两个数（Codex 复现）；
-    「半小时」是 0.5 小时，「一个半小时」「1个半小时」是 1.5 小时。"""
-    text = _VULGAR.sub(lambda m: _dec(int(m[1] or 0) + unicodedata.numeric(m[2])), text)
-    # 空白不要两段连着写（「\s*个?\s*」）：长串空白上会平方级回溯，一万六千个空格卡住事件循环两秒多（Codex 复现）
-    text = re.sub(r"(\d{1,6}|[一二两三四五六七八九十]{1,3})\s*(?:个\s*)?半\s*(?=小时|钟头)",
-                  lambda m: _dec((float(m[1]) if m[1][0].isdigit() else float(_cn_number(m[1]) or 0)) + 0.5), text)
-    return re.sub(r"(?<![\d一二两三四五六七八九十])半\s*(?:个\s*)?(?=小时|钟头)", "0.5", text)
-
-
-def _num(tok: str) -> float | None:
-    if tok[0].isdigit():
-        return float(tok)
-    n = _cn_number(tok)
-    return None if n is None else float(n)
+    return [(g.stage, g.year) for g in evidence.current_grades(text)]
 
 
 def _quantities(text: str) -> set[tuple[float, str]]:
-    """文本里的数和它的单位（没单位就是 ""）。全角先转半角（「３．７」）；中文数只认带单位或在括号里的（「高数A（一）」），
-    免得「一些」也成了 1；范围「三到五小时」两头都算小时。"""
-    text = _fractions(text or "")
-    text = unicodedata.normalize("NFKC", text)
-    # 分数两头都得是完整的整数：「3.7/4.0」里的「7/4」不是分数（原来算成 1.75，GPA 3.7 被拒、编的 3.1 反而收了，Codex 复现）
-    text = re.sub(r"(?<![\d.])(\d{1,3})\s*[⁄∕/]\s*(\d{1,3})(?![\d.])", lambda f: _dec(int(f[1]) / int(f[2])) if int(f[2]) else f[0], text)
-    out: set[tuple[float, str]] = set()
-    for m in _QTY.finditer(text):
-        a, b, unit = m.group(1), m.group(2), (m.group(3) or "")
-        u = _UNITS.get(unit.lower(), _UNITS.get(unit, "")) if unit else ""
-        bracketed = text[max(0, m.start() - 1):m.start()] in ("(", "（") and text[m.end():m.end() + 1] in (")", "）")
-        for tok in (a, b):
-            if not tok:
-                continue
-            if not tok[0].isdigit() and not u and not bracketed:
-                continue
-            n = _num(tok)
-            if n is not None:
-                out.add((n, u))
-    return out
-
-
-def _numbers_in(text: str) -> set[float]:
-    return {n for n, _ in _quantities(text)}
+    return {(q.lo, q.label) for q in evidence.quantities(text)}
 
 
 def _numbers_supported(value: str, quote: str) -> bool:
-    """值里写的每个数，引文里都得有同一个数、而且单位对得上（值没写单位就只比数）；小时和分钟可以互换。
-    原来「每周2小时」撑得住「每周20小时」、「3.07」撑得住「3.7」（Codex 复现）。"""
-    have = _quantities(quote)
-    for n, u in _quantities(value):
-        same = {(n, u)} if u else {(n, x) for _, x in have}
-        if u in _COUNTERS:  # 「个」和别的量词互通（「2个项目」「2项项目」），「门」和「篇」之间不通
-            same |= {(n, "个")} if u != "个" else {(n, c) for c in _COUNTERS}
-        if u == "h":
-            same.add((round(n * 60, 4), "min"))
-        if u == "min":
-            same.add((round(n / 60, 4), "h"))
-        if not (same & have or (u and (n, "") in have)):
-            return False
-    return True
-
-
-_POSITIVE_KEYS = ("interest", "goal", "direction", "field")
-_NEG_BEFORE = r"(?<!不是)(?<!并非)(?:不喜欢|讨厌|不想学|不想做|不想读|不想碰|不打算|不考虑|不感兴趣于|对)\s*"
-_NEG_AFTER = r"\s*(?:没有?|不|并不|不太|没什么)(?:什么|太)?(?:兴趣|感兴趣|想法|打算)"
+    return evidence.numbers_supported(value, quote)
 
 
 def _negated_in(value: str, quote: str) -> bool:
-    """引文里这个值是被否定的：「对 X 没有兴趣」「不喜欢 X」（「我不是不喜欢 X」这种双重否定不算）。"""
-    low = quote.lower()
-    for term in {value.lower(), *(a for a, full in _ALIASES.items() if full == value), *(full for a, full in _ALIASES.items() if a == value.lower())}:
-        t = re.escape(term) + (r"(?![a-z])" if term.isascii() else "")
-        if re.search(r"(?<!不是)(?<!并非)对\s*" + t + _NEG_AFTER, low) or re.search(r"(?<!不是)(?<!并非)(?:不喜欢|讨厌|不想学|不想做|不想读|不打算|不考虑)\s*" + t, low):
-            return True
-    return False
-
-
-_GRADE_WORDS = re.compile(r"(?i)\b(?:" + "|".join(list(_GRADE_EN) + list(_EN_ORD)) + r"|year|student|grad|graduate|college|university|pku)\b|[\s-]+")
+    occ = evidence.span_occurrences(value, quote)
+    return bool(occ) and _occurrence_reason(occ, quote, evidence.WISH) == "negated_in_evidence"
 
 
 def _grade_supported(value: str, quote: str) -> bool | None:
-    """年级值的约束，不分长短：值写了第几年，引文就得说了同一年；被否定的、过去的、改口的不算；
-    年级以外夹带的内容（「本科二年级，GPA4.0」）要另有着落（Codex 复现：长值原来跳过这些检查）。值里认不出年级返回 None。"""
-    if not _grades_in(value):
-        return None
-    stage, year = _grades_in(value)[0]
-    norm = unicodedata.normalize("NFKC", value)
-    rest = _GRADE_WORDS.sub("", _GRADE_STAGE_YEAR.sub("", _GRADE_RE.sub("", norm)))
-    if _content_chars(rest) and not (_numbers_supported(rest, quote) and _content_chars(rest) & _content_chars(_with_aliases(quote))):
-        return False
-    return any((stage is None or s is None or s == stage) and (year is None or y == year) for s, y in _grades_in(quote))
+    g = evidence.parse_grade(value)
+    if g is None or g is evidence.BAD:
+        return None if not evidence.grade_mentions(evidence.prep(value)) else False
+    return evidence.grade_supported(g[0], g[1], quote)
+
+
+def _with_aliases(text: str) -> str:
+    low = evidence.prep(text)
+    extra = [b for group in evidence.ALIAS_GROUPS for a in group if evidence._has(low, a) for b in group if b != a]
+    return low + " " + " ".join(extra)
 
 
 def _short_value_supported(key: str, value: str, quote: str) -> bool:
-    """短值也得撑得住。年级按（阶段, 第几年）比：值写了第几年，引文就得说了同一年（「本科在读」撑不住「本科二年级」），
-    被否定的不算；别的短值（算上常见缩写）至少要有一个内容字出现在引文里。"""
-    g = _grade_supported(value, quote) if key == "grade" else None
-    if g is not None:
-        return g
-    if key.split(":")[0] in _POSITIVE_KEYS and _negated_in(value, quote):
-        return False
+    """短值也得撑得住：结构化字段按上面的核对；别的短值至少要有一个内容字（算上常见缩写）出现在引文里，
+    而且不能只出现在被否定的地方。全是虚词的值（「会」）原来算作撑得住，「我没学过Python」→ base:code=会 就这么混进去。"""
+    typed = _typed_value(key, value, quote)
+    if typed is not None and typed is not evidence.BAD:
+        return typed[1] is None
     v = _content_chars(_with_aliases(value))
-    return not v or bool(v & _content_chars(_with_aliases(quote)))
+    if not v:
+        raw = {c for c in str(value) if not c.isspace()}
+        return bool(raw) and raw <= set(quote)
+    return bool(v & _content_chars(_with_aliases(quote))) and not _negated_only(value, quote)
 
 
 
@@ -682,6 +665,11 @@ def validate_ops(uid: str, ops: list[dict[str, Any]], evidence_pool: list[str]) 
             raw = {**raw, "value": f"{num:g}"}
         # 字段只收字符串（或不填）：原来 key 是列表就 .strip() 抛异常、整轮 500，valid_until 是 [] / {} 过了校验到 SQLite 才炸（Codex 复现）
         bad = next((f for f in _OP_FIELDS if not isinstance(raw.get(f), (str, type(None)))), None)
+        # 年级和数量字段的值可以是结构化的对象（{stage, year} / {value, unit, per}），形状对不对在下面按字段查
+        if bad == "value" and isinstance(raw.get("value"), dict) and isinstance(raw.get("key"), str) \
+                and _kind(canon_key(raw["key"])) in ("grade", "quantity") \
+                and not any(not isinstance(raw.get(f), (str, type(None))) for f in _OP_FIELDS if f != "value"):
+            bad = None
         if bad:
             rejected.append({"op": raw.get("op"), "key": raw.get("key"), "value": raw.get("value"), "raw": raw,
                              "reason": f"bad_type:{bad}"})
@@ -744,34 +732,44 @@ def validate_ops(uid: str, ops: list[dict[str, Any]], evidence_pool: list[str]) 
                 retire_id = target.id
                 op, target, changed_key = "add", None, True
 
-        value = str(raw.get("value") or "").strip()
-        if op in ("add", "replace") and not value:
+        raw_value = raw.get("value")
+        value = "" if isinstance(raw_value, dict) else str(raw_value or "").strip()
+        if op in ("add", "replace") and not value and not isinstance(raw_value, dict):
             rejected.append({**item, "reason": "empty_value"})
             continue
         if len(value) > 200:
             value = value[:200]
 
-        # 闸门②：引文得撑得住这个值。
+        # 闸门②：引文得撑得住这个值。结构化字段按字段核对，别的按支撑度。
         quote = str(raw.get("evidence_quote") or "").strip()
-        substantive = len(_content_chars(value)) >= _SUPPORT_MIN_CHARS
-        ratio = support_ratio(value, quote) if (op in ("add", "replace") and substantive) else 1.0
-        if op in ("add", "replace") and substantive and ratio < _SUPPORT_FLOOR:
-            rejected.append({**item, "reason": f"value_exceeds_evidence:{ratio:.2f}"})
-            continue
-        grade_ok = _grade_supported(value, quote) if key == "grade" else None
-        if op in ("add", "replace") and grade_ok is False:
-            rejected.append({**item, "reason": "grade_not_in_evidence"})
-            continue
-        if op in ("add", "replace") and key.split(":")[0] in _POSITIVE_KEYS and _negated_in(value, quote):
-            rejected.append({**item, "reason": "negated_in_evidence"})  # 「我对机器学习没有兴趣」不能记成兴趣（Codex 复现）
-            continue
-        if op in ("add", "replace") and grade_ok is None and not substantive and not _short_value_supported(key, value, quote):
-            # 短值原来跳过支撑度检查：学生说「我大二」，模型写年级「博士」也照样按 declared 存进去（Codex 复现）
-            rejected.append({**item, "reason": "short_value_not_in_evidence"})
-            continue
-        if op in ("add", "replace") and key != "grade" and not _numbers_supported(value, quote):
-            rejected.append({**item, "reason": "number_not_in_evidence"})
-            continue
+        ratio = 1.0
+        if op in ("add", "replace"):
+            typed = _typed_value(key, raw_value if isinstance(raw_value, dict) else value, quote)
+            if typed is evidence.BAD:
+                rejected.append({**item, "reason": "bad_type:value"})
+                continue
+            if typed is not None:
+                value, why = typed[:2]
+                ratio = typed[2] if len(typed) > 2 else 1.0
+                if why:
+                    rejected.append({**item, "reason": why})
+                    continue
+            else:
+                substantive = len(_content_chars(value)) >= _SUPPORT_MIN_CHARS
+                ratio = support_ratio(value, quote) if substantive else 1.0
+                if substantive and ratio < _SUPPORT_FLOOR:
+                    rejected.append({**item, "reason": f"value_exceeds_evidence:{ratio:.2f}"})
+                    continue
+                if _negated_only(value, quote):
+                    rejected.append({**item, "reason": "negated_in_evidence"})  # 「我没学过Python」撑不住「会Python」
+                    continue
+                if not substantive and not _short_value_supported(key, value, quote):
+                    # 短值原来跳过支撑度检查：学生说「我大二」，模型写年级「博士」也照样按 declared 存进去（Codex 复现）
+                    rejected.append({**item, "reason": "short_value_not_in_evidence"})
+                    continue
+                if not _numbers_supported(value, quote):
+                    rejected.append({**item, "reason": "number_not_in_evidence"})
+                    continue
 
         valid_until = raw.get("valid_until")
         if spec.requires_valid_until:

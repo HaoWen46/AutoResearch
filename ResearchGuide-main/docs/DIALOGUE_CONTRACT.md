@@ -54,7 +54,7 @@
     { "op": "add|replace|retract|support",
       "key": "见 §3 registry",
       "category": "background|interest|capability|preference|experience",
-      "value": "人可读的一句话",
+      "value": "人可读的一句话；grade/age/enroll_year/pace 写成对象，见 §3.3 闸门②",
       "evidence_quote": "必须能在本画像近期消息里逐字找到",
       "target_fact_id": "replace/retract/support 时必填",
       "valid_until": "constraint:* 必填，ISO 日期或 null" }
@@ -212,7 +212,20 @@
    - `≥ 0.8` → 收
    - `0.5 ~ 0.8` → 收，但**降级为 `inferred`**，`notes` 标 `partially_inferred`
    - `< 0.5` → **拒**（`value_exceeds_evidence`）
-   - value 内容不足 8 字 → 跳过本检查（`AI`、`大二` 是规范化缩写，逐字要求会误杀）
+   - value 内容不足 8 字 → 不算比例，但至少一个内容字（含常见缩写）在引文里，且不能只出现在被否定的地方
+
+   下面几种 key 不按比例，按字段核对（`server/evidence.py`；模型抽、代码对，不让模型自检）：
+
+   | key | value 形状 | 引文里要有 | 拒绝理由 |
+   | --- | --- | --- | --- |
+   | `grade` | `{"stage": 本科/硕士/博士/高中/null, "year": 1–6/null}`，或整串就是年级的字符串 | 按固定表认出的同一个（阶段, 第几年）；没说阶段的只撑本科或不写阶段 | `grade_not_in_evidence` |
+   | `age` `enroll_year` `pace` | `{"value": 数或[低,高], "unit", "per"}`，或带数的字符串 | 同一个数、同量纲单位（时分秒、天周、月年可换算），per 都写了就得一样 | `number_not_in_evidence` |
+   | `school` `department` `major` | 名字 | 别名表里同一实体的叫法（学校表、`curriculum.DEPT_ALIAS`、培养方案卡片）；库里没有的要原样出现；「数学」这类学科词要跟着系/院/专业 | `short_value_not_in_evidence` |
+   | `interest:*` `goal:*` `field:*` | 原话片段 | 值（或去掉「对…感兴趣」、换成同组缩写）原样出现；不是原样就要有四字以上的公共片段当锚，收下也降成 `inferred` | `short_value_not_in_evidence` |
+
+   以上和其余字段都要过范围检查：那一处在否定（含后置的「没兴趣」「没学过」、双重否定不算）、过去（以前、去年、「大一的时候」）、
+   改口（「打错了」、分句开头的「不对」）的范围里就拒，`negated_in_evidence`；年级、学校院系、数量还不能在「想、打算、以后」里。
+   范围只管到分句（标点、但是、现在）为止，否定管不到「的」后面被修饰的词。其余字段里的每个数也要在引文里有同一个数和单位。
 
    阈值是拿真实例子校准的（`审计与方案/calibrate_support.py`，9/9 符合预期）：
    真实事故那条是 **0.29**，而正常的值落在 **0.67–1.00**，分得开。
@@ -459,6 +472,8 @@ action: offered ─► accepted ─► in_progress ─► completed
 | 2 | `key` 命中 §3 registry 模式 | 丢弃 |
 | 3 | `category` 与 registry 一致 | 用 registry 的值覆盖 |
 | 4 | `evidence_quote` 非空，且是**本画像**近期消息的连续子串 | 丢弃 |
+| 4a | value 形状对（结构化字段的对象只能有约定的键、合法的值） | 丢弃，`bad_type:value` |
+| 4b | 引文撑得住 value（§3.3 闸门②：结构化字段逐项核对，其余按支撑度、数字、否定） | 丢弃或降级 |
 | 5 | `replace/retract/support` 的 `target_fact_id` 存在且属于本画像 | 丢弃 |
 | 6 | `constraint:*` 有 `valid_until` | 丢弃 |
 | 7 | `experience:*` 的 source 为 behavior | 丢弃 |

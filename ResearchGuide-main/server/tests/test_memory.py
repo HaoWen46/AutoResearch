@@ -27,7 +27,7 @@ POOL = [
     # 下面几句给「值要撑得住」：短值也得在学生原话里有着落（Codex 第十一轮），夹具里的值要有对应的原话
     "我对机器学习有兴趣，也关心注意力",
     "其实只想了解经济学",
-    "去年还是大一",
+    "我还是大一",
     "跟着教程跑过几遍",
 ]
 
@@ -536,7 +536,7 @@ def test_direction_is_exclusive():
 
 def test_single_cardinality_key_supersedes_old_value():
     uid = make_user()
-    acc, _ = memory.validate_ops(uid, ops(op("add", "grade", "大一", "去年还是大一")), POOL)
+    acc, _ = memory.validate_ops(uid, ops(op("add", "grade", "大一", "我还是大一")), POOL)
     memory.apply_ops(uid, acc, "d1")
     acc, _ = memory.validate_ops(uid, ops(op("add", "grade", "大二", "我大二")), POOL)
     a2, changed = memory.apply_ops(uid, acc, "d2")

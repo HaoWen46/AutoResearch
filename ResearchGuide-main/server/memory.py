@@ -537,9 +537,10 @@ def _fractions(text: str) -> str:
     """「½」「1½」「⅓」先整体算成小数（「1½」是 1.5）：原来 NFKC 把「1½」拼成「11⁄2」读成 5.5、⅓ 的循环小数被拆成两个数（Codex 复现）；
     「半小时」是 0.5 小时，「一个半小时」「1个半小时」是 1.5 小时。"""
     text = _VULGAR.sub(lambda m: _dec(int(m[1] or 0) + unicodedata.numeric(m[2])), text)
-    text = re.sub(r"(\d{1,6}|[一二两三四五六七八九十]{1,3})\s*个?\s*半\s*(?=小时|钟头)",
+    # 空白不要两段连着写（「\s*个?\s*」）：长串空白上会平方级回溯，一万六千个空格卡住事件循环两秒多（Codex 复现）
+    text = re.sub(r"(\d{1,6}|[一二两三四五六七八九十]{1,3})\s*(?:个\s*)?半\s*(?=小时|钟头)",
                   lambda m: _dec((float(m[1]) if m[1][0].isdigit() else float(_cn_number(m[1]) or 0)) + 0.5), text)
-    return re.sub(r"(?<![\d一二两三四五六七八九十])半\s*个?\s*(?=小时|钟头)", "0.5", text)
+    return re.sub(r"(?<![\d一二两三四五六七八九十])半\s*(?:个\s*)?(?=小时|钟头)", "0.5", text)
 
 
 def _num(tok: str) -> float | None:
@@ -554,7 +555,8 @@ def _quantities(text: str) -> set[tuple[float, str]]:
     免得「一些」也成了 1；范围「三到五小时」两头都算小时。"""
     text = _fractions(text or "")
     text = unicodedata.normalize("NFKC", text)
-    text = re.sub(r"(\d{1,3})\s*[⁄∕/]\s*(\d{1,3})(?!\d)", lambda f: _dec(int(f[1]) / int(f[2])) if int(f[2]) else f[0], text)
+    # 分数两头都得是完整的整数：「3.7/4.0」里的「7/4」不是分数（原来算成 1.75，GPA 3.7 被拒、编的 3.1 反而收了，Codex 复现）
+    text = re.sub(r"(?<![\d.])(\d{1,3})\s*[⁄∕/]\s*(\d{1,3})(?![\d.])", lambda f: _dec(int(f[1]) / int(f[2])) if int(f[2]) else f[0], text)
     out: set[tuple[float, str]] = set()
     for m in _QTY.finditer(text):
         a, b, unit = m.group(1), m.group(2), (m.group(3) or "")

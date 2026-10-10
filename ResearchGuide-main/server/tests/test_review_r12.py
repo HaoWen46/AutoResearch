@@ -362,3 +362,26 @@ def test_quantities_round16(value, quote, ok):
 def test_grade_phrasings_round16(value, quote, ok):
     acc, rej = memory.validate_ops(_uid(), [_op("grade", value, quote)], [quote])
     assert (len(acc) == 1) is ok, rej
+
+
+@pytest.mark.parametrize("text", [
+    "1" + " " * 20000 + "半小时",
+    "半" + " " * 20000 + "x",
+    "二" + " " * 20000 + "个x",
+])
+def test_half_hour_patterns_stay_linear(text):
+    """「\\s*个?\\s*」两段空白连着写，一万六千个空格卡住事件循环两秒多（Codex 第十七轮复现）。"""
+    import time
+    t0 = time.perf_counter()
+    memory._quantities(text)
+    assert time.perf_counter() - t0 < 1.0
+
+
+@pytest.mark.parametrize("value,quote,ok", [
+    ("GPA 3.7", "我的GPA是3.7/4.0", True),
+    ("GPA 3.1", "我的GPA是3.7/4.0", False),   # 原来把「7/4」当分数算成 1.75
+    ("GPA 3.75", "GPA 3.75/4.0", True),
+    ("每周0.5小时", "每周1/2小时", True),
+])
+def test_gpa_scale_is_not_a_fraction(value, quote, ok):
+    assert memory._numbers_supported(value, quote) is ok

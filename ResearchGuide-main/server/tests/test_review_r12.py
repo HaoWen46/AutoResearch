@@ -334,3 +334,31 @@ def test_memory_rules_round15(key, value, quote, ok):
 ])
 def test_quantities_round15(value, quote, ok):
     assert memory._numbers_supported(value, quote) is ok
+
+
+@pytest.mark.parametrize("value,quote,ok", [
+    ("每周5.5小时", "每周可以投入1½小时", False),   # 带分数原来被拼成 11⁄2
+    ("每周1.5小时", "每周可以投入1½小时", True),
+    ("每周33小时", "只能投入⅓小时", False),         # 循环小数原来被拆成两个数
+    ("每周0.5小时", "每周半小时", True),
+    ("每周1.5小时", "一个半小时", True),
+    ("完成2项科研项目", "完成2个科研项目", True),    # 「个」和别的量词互通
+    ("学完3门课程", "学完3个课程", True),
+])
+def test_quantities_round16(value, quote, ok):
+    assert memory._numbers_supported(value, quote) is ok
+
+
+@pytest.mark.parametrize("value,quote,ok", [
+    ("大二", "我大二，不对，我大三", False),             # 紧跟的「不对」「错了」是改口
+    ("大二", "我大二，错了，是大三", False),
+    ("大二", "我大二，作业错了三题。", True),            # 中间隔着别的词不算
+    ("大四", "本科四年里想做一次科研，我现在大二", False),  # 学制时长不是年级
+    ("大二", "本科四年里想做一次科研，我现在大二", True),
+    ("博二", "I am a second-year PhD graduate student.", True),   # 博士优先
+    ("研二", "I am a second-year PhD graduate student.", False),
+    ("本科二年级", "I am not first-year, I am a sophomore.", True),  # 否定的那一处不吞后面的年级
+])
+def test_grade_phrasings_round16(value, quote, ok):
+    acc, rej = memory.validate_ops(_uid(), [_op("grade", value, quote)], [quote])
+    assert (len(acc) == 1) is ok, rej

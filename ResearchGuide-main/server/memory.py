@@ -440,9 +440,9 @@ _EN_YEAR = re.compile(r"\b(first|second|third|fourth|fifth|[1-5](?:st|nd|rd|th))
 # 前面紧跟这些的年级不算现在的：否定（不是、不算）和过去（以前是、去年读）。「以前是大一，现在大二」只有大二
 _NEGATED = re.compile(r"(?:不是|不再是|并非|非|没在|不在|不算|算不上|(?:以前|之前|原来|去年|曾经|前年)(?:是|读|在读|上|念)?)\s*$")
 # 后面紧跟这些的是说错了、改口：「大二，哦打错了我是大三」只有大三
-_CORRECTED = re.compile(r"^[\s，,。.!！…~～]*(?:哦|啊|呃|嗯|额)?[\s，,]*(?:打错|说错|写错|口误|不对不对)")
+_CORRECTED = re.compile(r"^[\s，,。.!！…~～]*(?:哦|啊|呃|嗯|额)?[\s，,]*(?:打错|说错|写错|口误|不对|错了)")
 # 阶段词后直接跟年份、省了「第」：「我本科二年，北大的」（Codex 第十五轮）；没有阶段词的「三年」还是不算
-_GRADE_STAGE_YEAR = re.compile(r"(本科|大学|研究生|硕士|博士)\s*([一二三四五六1-6])\s*年(?![代份级])")
+_GRADE_STAGE_YEAR = re.compile(r"(本科|大学|研究生|硕士|博士)\s*([一二三四五六1-6])\s*年(?![代份级里内中制间期来])")
 
 
 def _grades_in(text: str) -> list[tuple[str | None, int | None]]:
@@ -464,15 +464,18 @@ def _grades_in(text: str) -> list[tuple[str | None, int | None]]:
     def negated(start: int) -> bool:
         return bool(_NEGATED.search(text[max(0, start - 6):start]) or re.search(r"\bnot\s+(?:a\s+|an\s+)?(?:[a-z-]+\s+)?$", low[max(0, start - 30):start]))
 
-    years = list(_EN_YEAR.finditer(low))
-    for m in years:
+    covered = []
+    for m in _EN_YEAR.finditer(low):
         n = _EN_ORD.get(m.group(1) or "") or (int(m.group(2)) if m.group(2) else None)
+        # 只看紧跟在 year 后面的阶段词：原来往后看 24 个字，「I am not first-year, I am a sophomore」的 sophomore 被吞掉（Codex 复现）
+        sm = re.match(r"[\s-]*((?:undergrad(?:uate)?|phd|ph\.d\.?|doctoral|master'?s?|graduate|grad|college)\b(?:\s+(?:graduate|student))?)?", low[m.end():])
+        words = sm.group(1) or ""
+        covered.append((m.start(), m.end() + sm.end()))
         if n and not negated(m.start()):
-            after = low[m.end():m.end() + 24]
-            stage = "硕" if re.search(r"\b(?:graduate|grad|master|ms)\b", after) and "undergrad" not in after else \
-                ("博" if "phd" in after else ("本" if "undergrad" in after or "college" in after else None))
+            stage = ("博" if re.search(r"phd|ph\.d|doctoral", words) else  # 博士优先：「PhD graduate student」是博士不是硕士
+                     "本" if ("undergrad" in words or "college" in words) else
+                     "硕" if re.search(r"master|graduate|grad", words) else None)
             out.append((stage, n))
-    covered = [(m.start(), m.end() + 24) for m in years]  # 「second-year undergrad」里的 undergrad 已经算进上面那一处
     for m in re.finditer(r"[a-z']+", low):
         hit = _GRADE_EN.get(m.group().replace("'", ""))
         if hit and not negated(m.start()) and not any(a <= m.start() < b for a, b in covered):
@@ -517,9 +520,26 @@ _UNITS = {"小时": "h", "h": "h", "hr": "h", "hrs": "h", "hour": "h", "hours": 
           "分钟": "min", "min": "min", "mins": "min", "分": "min", "秒": "s", "天": "d", "日": "d", "周": "w", "星期": "w",
           "个月": "mo", "月": "mo", "年": "y", "岁": "age", "学分": "cr", "门": "门", "个": "个", "次": "次", "篇": "篇",
           "项": "项", "人": "人", "倍": "x", "%": "%", "级": "lv", "期": "期", "章": "章", "节": "节", "页": "页", "题": "题"}
+_COUNTERS = {"个", "项", "门", "篇", "次", "期", "章", "节", "页", "题", "人"}
 _UNIT_RE = "|".join(sorted(map(re.escape, _UNITS), key=len, reverse=True))
 _NUM = r"(\d{1,9}(?:\.\d{1,4})?|[零一二两三四五六七八九十百]+)"
 _QTY = re.compile(_NUM + r"(?:\s*(?:到|至|~|-|—|或)\s*" + _NUM + r")?\s*(" + _UNIT_RE + r")?", re.IGNORECASE)
+
+
+_VULGAR = re.compile(r"(?:(\d{1,6})\s*)?([¼½¾⅐⅑⅒⅓⅔⅕⅖⅗⅘⅙⅚⅛⅜⅝⅞])")  # 空白只跟在数字后面：「(数)?\s*」在长串空白上会平方级回溯
+
+
+def _dec(x: float) -> str:
+    return f"{x:.4f}".rstrip("0").rstrip(".")  # 最多四位小数：正好是数的正则能整段吃下的长度
+
+
+def _fractions(text: str) -> str:
+    """「½」「1½」「⅓」先整体算成小数（「1½」是 1.5）：原来 NFKC 把「1½」拼成「11⁄2」读成 5.5、⅓ 的循环小数被拆成两个数（Codex 复现）；
+    「半小时」是 0.5 小时，「一个半小时」「1个半小时」是 1.5 小时。"""
+    text = _VULGAR.sub(lambda m: _dec(int(m[1] or 0) + unicodedata.numeric(m[2])), text)
+    text = re.sub(r"(\d{1,6}|[一二两三四五六七八九十]{1,3})\s*个?\s*半\s*(?=小时|钟头)",
+                  lambda m: _dec((float(m[1]) if m[1][0].isdigit() else float(_cn_number(m[1]) or 0)) + 0.5), text)
+    return re.sub(r"(?<![\d一二两三四五六七八九十])半\s*个?\s*(?=小时|钟头)", "0.5", text)
 
 
 def _num(tok: str) -> float | None:
@@ -532,9 +552,9 @@ def _num(tok: str) -> float | None:
 def _quantities(text: str) -> set[tuple[float, str]]:
     """文本里的数和它的单位（没单位就是 ""）。全角先转半角（「３．７」）；中文数只认带单位或在括号里的（「高数A（一）」），
     免得「一些」也成了 1；范围「三到五小时」两头都算小时。"""
-    text = unicodedata.normalize("NFKC", text or "")
-    # 「½」NFKC 之后是「1⁄2」：原来拆成 1 和 2 两个数，半小时能撑住「每周2小时」（Codex 复现）
-    text = re.sub(r"(\d{1,6})\s*[⁄∕]\s*(\d{1,6})", lambda f: f"{int(f[1]) / int(f[2]):g}" if int(f[2]) else f[0], text)
+    text = _fractions(text or "")
+    text = unicodedata.normalize("NFKC", text)
+    text = re.sub(r"(\d{1,3})\s*[⁄∕/]\s*(\d{1,3})(?!\d)", lambda f: _dec(int(f[1]) / int(f[2])) if int(f[2]) else f[0], text)
     out: set[tuple[float, str]] = set()
     for m in _QTY.finditer(text):
         a, b, unit = m.group(1), m.group(2), (m.group(3) or "")
@@ -561,6 +581,8 @@ def _numbers_supported(value: str, quote: str) -> bool:
     have = _quantities(quote)
     for n, u in _quantities(value):
         same = {(n, u)} if u else {(n, x) for _, x in have}
+        if u in _COUNTERS:  # 「个」和别的量词互通（「2个项目」「2项项目」），「门」和「篇」之间不通
+            same |= {(n, "个")} if u != "个" else {(n, c) for c in _COUNTERS}
         if u == "h":
             same.add((round(n * 60, 4), "min"))
         if u == "min":

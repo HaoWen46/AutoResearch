@@ -1975,9 +1975,14 @@ function coverageBoard() {
     const btn = el("button", "btn small", "识别");
     btn.type = "button";
     const report = el("div", "cov-report");
+    // 「就用这份」只留绑定当前预览的那一个：原来每识别一次追加一个，点到旧的会把旧文本的成绩写回去（Codex 复现：90 被盖成 60）
+    let confirmBtn = null;
+    const dropConfirm = () => { if (confirmBtn) { confirmBtn.remove(); confirmBtn = null; } };
+    ta.addEventListener("input", dropConfirm);  // 识别之后又改了文字，原来的预览就不作数了
     btn.onclick = async () => {
       const text = ta.value.trim();
       if (!text) { toast("先把成绩单粘进来"); return; }
+      dropConfirm();
       btn.disabled = true;
       try {
         const r = await api("POST", "/api/me/transcript/parse", { uid: S.uid, text });
@@ -2015,6 +2020,7 @@ function coverageBoard() {
         (r.warnings || []).forEach((w) => report.appendChild(el("p", "cov-warn", esc(w))));
         const ok = el("button", "btn small", "就用这份");
         ok.type = "button";
+        confirmBtn = ok;
         ok.onclick = async () => {
           ok.disabled = true;
           try {

@@ -41,7 +41,9 @@ def canon_key(key: str) -> str:
     if ":" not in k:
         return k
     ns, slug = k.split(":", 1)
-    return f"{ns}:{_SEP_RE.sub('-', slug.strip()).strip('-. ')}"
+    k = f"{ns}:{_SEP_RE.sub('-', slug.strip()).strip('-. ')}"
+    # 在册的精确 key 带下划线（base:math_code）：规范化后要认回原样，原来变成 base:math-code 查不到（Codex 复现）
+    return next((e for e in _EXACT if ":" in e and _SEP_RE.sub("-", e) == k), k)
 
 
 class KeySpec(NamedTuple):
@@ -429,23 +431,59 @@ def support_ratio(value: str, quote: str) -> float:
 # 「我没学过Python」→「会」「北京大学」撑「清华大学」都能混过去。现在每种字段一个确定的核对办法：
 #   grade        {stage, year}：原话里按固定的表认出同一个（阶段, 第几年），说的是现在；
 #   age/enroll_year/pace  {value, unit, per}：原话里有同一个数、同一量纲的单位（小时和分钟、年和月可以换算）；
-#   school/department/major：库里的名字或简称在原话里出现、说的是现在；
-#   interest/goal/field：值就是原话的一段（或常见缩写），不在否定、过去、改口里；
-#   其余字段（direction 的值常是库里的方向名，不一定是原话）：照旧按支撑度，另外查数字和否定。
+#   school/department/major：库里的名字或简称在原话里作为学籍出现、说的是现在；
+#   interest/goal/field：值就是原话的一段（或常见缩写），不在否定、过去、假设、改口、别人的事里；
+#   其余字段（direction 的值常是库里的方向名，不一定是原话）：照旧按支撑度，另外查数字、英文词，和原话在共有片段上的说法要一致。
+# 范围都按引文所在的整条消息算（evidence.scan），只认引文那一段里的说法。
 _QTY_KEYS = {"age": ("age", "岁"), "enroll_year": ("calyear", "年"), "pace": ("clock", "小时")}
 _ENTITY_KEYS = ("school", "department", "major")
 _SPAN_KEYS = ("interest", "goal", "field")
 # 值外面包着的「对…感兴趣」「想学…」不是值本身：「对机器学习感兴趣」按「机器学习」去原话里找
 _FRAMING = re.compile(r"^(?:我)?(?:对于?|想学|想做|想试试|想往|想走|喜欢|关注|关心|希望)?(.+?)(?:感兴趣|有兴趣|很感兴趣|方向|领域|相关)?$")
 _PER_CN = {"w": "周", "d": "天", "mo": "月", "y": "年", "term": "学期"}
-# 入学年份本来就是过去的事：「我去年2025年入学」不能因为「去年」拒掉（Codex 复现）；年龄、每周时间说的是现在
-_QTY_SCOPES = {"enroll_year": frozenset({evidence.NEG, evidence.CORRECTED})}
-# 数量字符串里除了这个量只许有这些：「19岁，计算机基础扎实」不是一个年龄，原来只核了 19 就把整串按自述存下（Codex 复现）
+# 年龄、每周时间说的是现在（「我打算每周投入九小时」不算，Codex 复现）；入学年份本来就是过去的事（「我去年2025年入学」，Codex 复现）
+_QTY_SCOPES = {"enroll_year": evidence.STATE - {evidence.PAST}}
+# 本来就是「想」的自由文字字段，原话在打算里不算不一致
+_TEXT_WISH = ("career", "direction")
+# 能力类允许「只撑住一部分 → 降成 inferred」（docs/DIALOGUE_CONTRACT.md §3.3）；方向值常是库里的方向名。别的自由文字字段不许多出原话没有的东西
+_TEXT_LOOSE = ("base", "capability", "direction")
+# 值里不算「多出来的东西」的词：包装、程度、时间指代
+_FILLER_WORDS = re.compile(r"研究|兴趣|方向|领域|相关|应用|方面|内容|正在|在做|在修|在上|目前|现在|这学期|本学期|已经|还|很|比较|主要|大概|一些|一点|"
+                           r"最多|至少|不到|以上|以内|左右|大约|约|只有|只能")
+# 入学年份要连着入学说（「2021年我参加了竞赛」不是入学，Codex 复现）；每周时间不能是上课、通勤这类占掉的时间（Codex 复现）
+_ENROLL_WORDS = re.compile(r"入学|入校|进校|考入|考进|入读|进的|来的|报到|来北大|进北大|上大学|级|届|(?<![a-z])(?:enrolled|entered|class of)(?![a-z])")
+_NOT_FREE_TIME = re.compile(r"课|体育|通勤|睡|上班|兼职|打工|家教|坐车")
+# 数量字符串里除了这个量只许有这些：「19岁，计算机基础扎实」不是一个年龄（Codex 复现）
 _QTY_FILLER = re.compile(r"(?:每[ \t]?个?(?:周|星期|礼拜|天|日|月|年|学期)|[一1][ \t]?个?(?:周|星期|礼拜|天|月)|今年|周岁|虚岁|入学|入校|级|届|约|大约|大概|"
-                         r"左右|差不多|上下|以上|以内|至少|最多|不到|多|能|可以|投入|学习|时间|per|a|an|week|day|month|weekly|daily|about|"
+                         r"左右|差不多|上下|能|可以|投入|学习|时间|per|a|an|week|day|month|weekly|daily|about|"
                          r"around|roughly|hours?|[\s,，。.;；~～:：/])*")
 _UNIT_SHOWN = {u: "小时" for u in ("h", "hr", "hrs", "hour", "hours", "钟头", "钟")} | \
               {u: "分钟" for u in ("min", "mins", "minute", "minutes", "分")} | {"周岁": "岁", "years old": "岁", "year old": "岁"}
+
+
+class _Ctx(NamedTuple):
+    text: str                             # 引文所在的整条消息（prep 过）
+    windows: evidence.Windows             # 引文在这条消息里的每一处位置
+    quote: str                            # 引文原样（比内容字、支撑度用）
+
+
+def _context(quote: str, pool: list[str] | None = None) -> _Ctx:
+    """引文按它所在的整条消息核对范围：模型只引「大四」，「我不是大四」的「不是」照样算（原来只看引文，否定、过去、主语都被裁在外面，Codex 复现）。
+    同一句话出现在几条消息里，用最近的那条。"""
+    q = evidence.prep(quote).strip()
+    for msg in reversed(pool or []):
+        t = evidence.prep(msg)
+        wins, i = [], t.find(q) if q else -1
+        while i != -1:
+            wins.append((i, i + len(q)))
+            i = t.find(q, i + 1)
+        if wins:
+            return _Ctx(t, evidence.Windows(tuple(a for a, _ in wins), len(q)), quote)
+    return _Ctx(q, evidence.Windows((0,), len(q)), quote)
+
+
+def _inside(ctx: _Ctx, s: int, e: int) -> bool:
+    return ctx.windows.contain(s, e)
 
 
 def _kind(key: str) -> str:
@@ -469,7 +507,8 @@ def _num(x: Any) -> float | None:
 
 
 def _parse_qty(key: str, value: Any) -> tuple[evidence.Qty, str] | None | object:
-    """{value, unit, per} 或者一段写着数的字符串 →（这个量, 存库的写法）。字符串里没有数 → None（按普通文字核对）；字典形状不对 → BAD。
+    """{value, unit, per} 或者一段写着数的字符串 →（这个量, 存库的写法）。字符串里没有数 → None（按普通文字核对）；
+    字典形状不对、或者字符串不只是一个这种量（「19岁，已发表论文」「五周」「3」门课）→ BAD 或拒。
     字典先拼成「每周10小时」再交给同一个解析，免得两套单位规则。"""
     dim, unit0 = _QTY_KEYS[key]
     if isinstance(value, dict):
@@ -489,69 +528,103 @@ def _parse_qty(key: str, value: Any) -> tuple[evidence.Qty, str] | None | object
             if not per_code:
                 return evidence.BAD
         text = (f"每{_PER_CN[per_code]}" if per_code else "") + evidence.dec(lo) + (f"到{evidence.dec(hi)}" if hi != lo else "") + unit
-        shown = text
     else:
-        text = shown = str(value or "").strip()
+        text = str(value or "").strip()
     qs = evidence.quantities(text)
     if not qs:
         return evidence.BAD if isinstance(value, dict) else None
     q = qs[0]
     t = evidence.prep(text)
-    if len(qs) == 1 and not _QTY_FILLER.fullmatch(t[:q.start] + " " + t[q.end:]):
-        return None  # 夹着别的内容：按普通文字核对（支撑度、数字）
-    if not q.dim and not isinstance(value, dict):  # 字符串里光一个数（「19」）：照旧只比数，原话里有同一个数就行
-        return (q, shown) if len(qs) == 1 else None
+    if len(qs) != 1 or not _QTY_FILLER.fullmatch(t[:q.start] + " " + t[q.end:]):
+        return evidence.BAD if isinstance(value, dict) else "number_not_in_evidence"
     if not q.dim:  # 光一个数：按这个字段本来的单位（年龄 20 = 20 岁，入学 24 = 2024 年）
         lo, hi = q.lo, q.hi
         if dim == "calyear" and lo < 100:
             lo, hi = lo + 2000, hi + 2000
         q = q._replace(dim=dim, lo=lo, hi=hi, base_lo=lo * (60 if dim == "clock" else 1), base_hi=hi * (60 if dim == "clock" else 1))
-    if len(qs) != 1 or q.dim != dim:
-        return evidence.BAD if isinstance(value, dict) else None
-    if isinstance(value, dict):
-        if key == "enroll_year" and q.lo != q.hi:
-            return evidence.BAD
-        span = evidence.dec(q.lo) + (f"到{evidence.dec(q.hi)}" if q.hi != q.lo else "")  # 范围两头都留（原来只存低的那头，Codex 复现）
-        shown = {"age": f"{span}岁", "enroll_year": span}.get(key, shown)
-    return q, shown
+    if q.dim != dim or (key == "enroll_year" and q.lo != q.hi):
+        return evidence.BAD if isinstance(value, dict) else "number_not_in_evidence"
+    if not isinstance(value, dict):
+        return q, text
+    span = evidence.dec(q.lo) + (f"到{evidence.dec(q.hi)}" if q.hi != q.lo else "")  # 范围两头都留（原来只存低的那头，Codex 复现）
+    return q, {"age": f"{span}岁", "enroll_year": span}.get(key, text)
 
 
-def _qty_reason(key: str, q: evidence.Qty, quote: str) -> str | None:
-    sc = evidence.scan(evidence.prep(quote))
-    hits = [h for h in evidence.quantities(quote) if evidence.qty_match(q, h, strict=bool(q.dim))]
+def _qty_clause(ctx: _Ctx, h: evidence.Qty) -> str:
+    a, b = evidence.scan(ctx.text).clause(h.start)
+    return ctx.text[a:b]
+
+
+def _qty_reason(key: str, q: evidence.Qty, ctx: _Ctx, strict: bool) -> str | None:
+    hits = [h for h in evidence.quantities(ctx.text) if _inside(ctx, h.start, h.end) and evidence.qty_match(q, h, strict=strict)]
+    if strict and key == "enroll_year":  # 旧的字符串值照旧只比数
+        hits = [h for h in hits if h.label in ("级", "届") or _ENROLL_WORDS.search(_qty_clause(ctx, h))]
+    if strict and key == "pace":  # 「课余」「课后」不是课
+        hits = [h for h in hits if not _NOT_FREE_TIME.search(re.sub(r"课[余外后间]", "", _qty_clause(ctx, h)))]
     if not hits:
         return "number_not_in_evidence"
-    kinds = _QTY_SCOPES.get(key, evidence.WISH)
+    sc = evidence.scan(ctx.text)
+    kinds = _QTY_SCOPES.get(key, evidence.STATE)
     return None if any(evidence.is_current(sc, h.start, h.end, kinds) for h in hits) else "negated_in_evidence"
 
 
-def _occurrence_reason(occ: list[tuple[int, int]], quote: str, kinds: frozenset[str]) -> str | None:
+def _occurrence_reason(occ: list[tuple[int, int]], ctx: _Ctx, kinds: frozenset[str]) -> str | None:
+    occ = [o for o in occ if _inside(ctx, *o)]
     if not occ:
         return "short_value_not_in_evidence"
-    sc = evidence.scan(evidence.prep(quote))
+    sc = evidence.scan(ctx.text)
     return None if any(evidence.is_current(sc, s, e, kinds) for s, e in occ) else "negated_in_evidence"
 
 
-def _negated_only(value: str, quote: str) -> bool:
-    """值本身没有否定，它和原话共有的片段却都在否定或改口里：「我没学过Python」撑不住「会Python」，「数学不太好」撑不住「数学很好」。
-    英文词（Python、PyTorch）是具体的东西，单个被否定也算；中文片段要全被否定才算（「不能超过两小时」里的「小时」不代表整条被否定）。"""
-    if evidence.has_negation(value):
-        return False
-    sc = evidence.scan(evidence.prep(quote))
-    kinds = frozenset({evidence.NEG, evidence.CORRECTED})
+def _scope_mismatch(key: str, value: str, ctx: _Ctx) -> bool:
+    """自由文字的值和原话在共有片段上说法不一致：原话是否定、过去、打算、假设、别人的事、改口，值却当成他现在的事
+    （「我没学过Python」→「会Python」、「我上学期在上概率论」→「在上概率论」、「我朋友在上计量」→ 他在上，Codex 复现）；
+    值里有否定原话却没有也不行（「我会 SQL」→「不会 SQL」）。英文词是具体的东西，一个不一致就算；中文片段要全不一致才算。"""
+    kinds = evidence.STATE - ({evidence.IRREALIS} if key.split(":")[0] in _TEXT_WISH else set())
+    sc = evidence.scan(ctx.text)
+    if evidence.has_negation(value) and not evidence.has_negation(ctx.quote) \
+            and not any(evidence.NEG in evidence.kinds_at(sc, a, a + ctx.windows.length, kinds) for a in ctx.windows.starts):
+        return True
+    vt = evidence.prep(value)
+    vs = evidence.scan(vt)
     verdicts = []
-    # 缩写也要换着找：「我不喜欢AI」撑不住「人工智能」（原来只按字面找片段，没找到就当没被否定，Codex 复现）
-    for a in {a for form in evidence.span_forms(value) for a in evidence.anchors(form, quote, min_len=2)}:
-        occ = evidence.span_occurrences(a, quote)
-        if occ:
-            negated = not any(evidence.affirmed(sc, s, e, kinds) for s, e in occ)
-            if negated and a.isascii():
-                return True
-            verdicts.append(negated)
+    # 缩写也要换着找：「我不喜欢AI」撑不住「人工智能」（Codex 复现）
+    for a in {a for form in evidence.span_forms(value) for a in evidence.anchors(form, ctx.quote, min_len=2)}:
+        occ = [o for o in evidence.span_occurrences(a, ctx.text) if _inside(ctx, *o)]
+        if not occ:
+            continue
+        own = evidence._find(vt, a)
+        v = evidence.kinds_at(vs, *own[0], kinds) if own else set()
+        if _PERFECTIVE.search(vt):  # 「学过高等数学」本来就是说以前的事，原话里的「以前」不算不一致（Codex 复现）
+            v = v | {evidence.PAST}
+        ok = any(not (q - v) and (evidence.NEG in q) == (evidence.NEG in v)
+                 for q in (evidence.kinds_at(sc, s, e, kinds) for s, e in occ))
+        if not ok and a.isascii():
+            return True
+        verdicts.append(not ok)
     return bool(verdicts) and all(verdicts)
 
 
-def _typed_value(key: str, value: Any, quote: str) -> tuple | None | object:
+_PERFECTIVE = re.compile(r"[学修做用写上读看]过|曾经|曾")
+
+
+def _extra_claims(value: str, ctx: _Ctx) -> bool:
+    """值里有原话没说的东西：去掉和原话共有的片段（两个字以上）、数字、虚词和包装词后还剩两个字以上的内容。
+    「正在开发大型推荐系统」对「我在看推荐系统入门教程」多出了「开发大型」，「机器学习和量子化学」多出了「量子化学」（Codex 复现）。"""
+    rest = evidence.prep(value)
+    for a in sorted({a for form in evidence.span_forms(value) for a in evidence.anchors(form, ctx.quote, min_len=2)}, key=len, reverse=True):
+        rest = rest.replace(a, " ")
+    rest = _FILLER_WORDS.sub(" ", rest)
+    return len(_content_chars(re.sub(r"[0-9.]+", " ", rest)) - _content_chars(evidence.prep(ctx.quote))) >= 2
+
+
+def _words_missing(value: str, ctx: _Ctx) -> bool:
+    """值里的英文词（Java、PyTorch）原话里得有同一个词：原来按字母重合，「我会 JavaScript」撑住了「精通 Java」（Codex 复现）。"""
+    q = evidence.prep(ctx.quote)
+    return any(w.isascii() and not any(evidence._has(q, f) for f in evidence.span_forms(w)) for w in evidence.runs(value))
+
+
+def _typed_value(key: str, value: Any, ctx: _Ctx) -> tuple | None | object:
     """结构化字段的核对：（存库的值, 拒绝理由或 None[, 只撑住一部分时的支撑度]）。
     不是结构化字段、或者字符串里认不出结构 → None；字典形状不对 → BAD。"""
     kind = _kind(key)
@@ -562,37 +635,39 @@ def _typed_value(key: str, value: Any, quote: str) -> tuple | None | object:
         if g is None:  # 「本科二年级，GPA4.0」：年级后面夹带了别的，整条不收
             return str(value), "grade_not_in_evidence"
         shown = evidence.render_grade(*g) if isinstance(value, dict) else str(value).strip()
-        return shown, (None if evidence.grade_supported(g[0], g[1], quote) else "grade_not_in_evidence")
+        return shown, (None if evidence.grade_supported(g[0], g[1], ctx.text, ctx.windows) else "grade_not_in_evidence")
     if isinstance(value, dict) and kind != "quantity":
         return evidence.BAD
     if kind == "quantity":
         parsed = _parse_qty(key, value)
         if parsed is None or parsed is evidence.BAD:
             return parsed
+        if isinstance(parsed, str):
+            return str(value), parsed
         q, shown = parsed
-        return shown, _qty_reason(key, q, quote)
+        return shown, _qty_reason(key, q, ctx, strict=isinstance(value, dict))
     text = str(value).strip()
     if kind == "entity":
-        return text, _occurrence_reason(evidence.entity_occurrences(key, text, quote), quote, evidence.STATE)
+        return text, _occurrence_reason(evidence.entity_occurrences(key, text, ctx.text, ctx.windows), ctx, evidence.STATE)
     if kind == "span":
-        occ = evidence.span_occurrences(text, quote)
-        core = _FRAMING.match(text.strip())
-        if not occ and core and core.group(1) != text.strip():
-            occ = evidence.span_occurrences(core.group(1), quote)
+        occ = [o for o in evidence.span_occurrences(text, ctx.text) if _inside(ctx, *o)]
+        core = _FRAMING.match(text)
+        if not occ and core and core.group(1) != text:
+            occ = [o for o in evidence.span_occurrences(core.group(1), ctx.text) if _inside(ctx, *o)]
         if occ:
-            return text, _occurrence_reason(occ, quote, evidence.WISH)
+            return text, _occurrence_reason(occ, ctx, evidence.WISH)
         # 不是原话：值里得有原话的一大段（四个字以上的中文或一个英文词）当锚，锚说的是现在；收下也只算我们推的
-        anchors = [o for a in evidence.anchors(text, quote) for o in evidence.span_occurrences(a, quote)]
-        ratio = support_ratio(text, quote)
-        if not anchors or ratio < _SUPPORT_FLOOR:
+        anchors = [o for a in evidence.anchors(text, ctx.quote) for o in evidence.span_occurrences(a, ctx.text)]
+        ratio = support_ratio(text, ctx.quote)
+        if not anchors or ratio < _SUPPORT_FLOOR or _words_missing(text, ctx) or _extra_claims(_FRAMING.match(text).group(1), ctx):
             return text, "short_value_not_in_evidence"
-        if not _numbers_supported(text, quote):  # 「每周读5篇」不能借「每周读2篇机器学习论文」的锚混进来（Codex 复现）
+        if not _numbers_supported(text, ctx.quote):  # 「每周读5篇」不能借「每周读2篇机器学习论文」的锚混进来（Codex 复现）
             return text, "number_not_in_evidence"
-        return text, _occurrence_reason(anchors, quote, evidence.WISH), min(ratio, _SUPPORT_OK - 0.001)
+        return text, _occurrence_reason(anchors, ctx, evidence.WISH), min(ratio, _SUPPORT_OK - 0.001)
     return None
 
 
-# 下面几个是老接口，测试和调用方还在用，都落到 evidence 上
+# 下面几个是老接口，测试和调用方还在用，都落到 evidence 上（只有引文、没有整条消息时按引文本身算）
 def _grades_in(text: str) -> list[tuple[str | None, int | None]]:
     return [(g.stage, g.year) for g in evidence.current_grades(text)]
 
@@ -606,15 +681,17 @@ def _numbers_supported(value: str, quote: str) -> bool:
 
 
 def _negated_in(value: str, quote: str) -> bool:
-    occ = evidence.span_occurrences(value, quote)
-    return bool(occ) and _occurrence_reason(occ, quote, evidence.WISH) == "negated_in_evidence"
+    ctx = _context(quote)
+    occ = evidence.span_occurrences(value, ctx.text)
+    return bool(occ) and _occurrence_reason(occ, ctx, evidence.WISH) == "negated_in_evidence"
 
 
 def _grade_supported(value: str, quote: str) -> bool | None:
     g = evidence.parse_grade(value)
     if g is None or g is evidence.BAD:
         return None if not evidence.grade_mentions(evidence.prep(value)) else False
-    return evidence.grade_supported(g[0], g[1], quote)
+    ctx = _context(quote)
+    return evidence.grade_supported(g[0], g[1], ctx.text, ctx.windows)
 
 
 def _with_aliases(text: str) -> str:
@@ -623,19 +700,18 @@ def _with_aliases(text: str) -> str:
     return low + " " + " ".join(extra)
 
 
-def _short_value_supported(key: str, value: str, quote: str) -> bool:
+def _short_value_supported(key: str, value: str, quote: str, ctx: _Ctx | None = None) -> bool:
     """短值也得撑得住：结构化字段按上面的核对；别的短值至少要有一个内容字（算上常见缩写）出现在引文里，
-    而且不能只出现在被否定的地方。全是虚词的值（「会」）原来算作撑得住，「我没学过Python」→ base:code=会 就这么混进去。"""
-    typed = _typed_value(key, value, quote)
+    英文词要整个出现，说法要和原话一致。全是虚词的值（「会」）原来算作撑得住，「我没学过Python」→ base:code=会 就这么混进去。"""
+    ctx = ctx or _context(quote)
+    typed = _typed_value(key, value, ctx)
     if typed is not None and typed is not evidence.BAD:
         return typed[1] is None
     v = _content_chars(_with_aliases(value))
     if not v:
         raw = {c for c in str(value) if not c.isspace()}
         return bool(raw) and raw <= set(quote)
-    return bool(v & _content_chars(_with_aliases(quote))) and not _negated_only(value, quote)
-
-
+    return bool(v & _content_chars(_with_aliases(quote))) and not _words_missing(value, ctx) and not _scope_mismatch(key, value, ctx)
 
 
 # 这条记忆改变未来的哪个决策。填不出就没资格进画像。
@@ -760,7 +836,8 @@ def validate_ops(uid: str, ops: list[dict[str, Any]], evidence_pool: list[str]) 
         quote = str(raw.get("evidence_quote") or "").strip()
         ratio = 1.0
         if op in ("add", "replace"):
-            typed = _typed_value(key, raw_value if isinstance(raw_value, dict) else value, quote)
+            ctx = _context(quote, evidence_pool)
+            typed = _typed_value(key, raw_value if isinstance(raw_value, dict) else value, ctx)
             if typed is evidence.BAD:
                 rejected.append({**item, "reason": "bad_type:value"})
                 continue
@@ -772,14 +849,22 @@ def validate_ops(uid: str, ops: list[dict[str, Any]], evidence_pool: list[str]) 
                     continue
             else:
                 substantive = len(_content_chars(value)) >= _SUPPORT_MIN_CHARS
-                ratio = support_ratio(value, quote) if substantive else 1.0
-                if substantive and ratio < _SUPPORT_FLOOR:
+                # 短值也算支撑度（算上缩写）：原来一个字对上就收，「编程能力非常扎实」被「我刚开始学编程」撑住（Codex 复现）
+                v = _content_chars(evidence.prep(value))
+                ratio = support_ratio(value, quote) if substantive else (len(v & _content_chars(_with_aliases(quote))) / len(v) if v else 1.0)
+                if v and ratio < _SUPPORT_FLOOR:
+                    rejected.append({**item, "reason": f"value_exceeds_evidence:{ratio:.2f}" if substantive else "short_value_not_in_evidence"})
+                    continue
+                if key.split(":")[0] not in _TEXT_LOOSE and _extra_claims(value, ctx):
                     rejected.append({**item, "reason": f"value_exceeds_evidence:{ratio:.2f}"})
                     continue
-                if _negated_only(value, quote):
+                if _words_missing(value, ctx):
+                    rejected.append({**item, "reason": "short_value_not_in_evidence"})
+                    continue
+                if _scope_mismatch(key, value, ctx):
                     rejected.append({**item, "reason": "negated_in_evidence"})  # 「我没学过Python」撑不住「会Python」
                     continue
-                if not substantive and not _short_value_supported(key, value, quote):
+                if not substantive and not _short_value_supported(key, value, quote, ctx):
                     # 短值原来跳过支撑度检查：学生说「我大二」，模型写年级「博士」也照样按 declared 存进去（Codex 复现）
                     rejected.append({**item, "reason": "short_value_not_in_evidence"})
                     continue

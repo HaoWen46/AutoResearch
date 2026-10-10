@@ -207,3 +207,111 @@ def test_an_age_range_keeps_both_ends():
     assert acc[0]["value"] == "19到20岁"
     acc, rej = _check("enroll_year", {"value": [2023, 2024], "unit": "年"}, "2023到2024年入学")
     assert acc == [] and rej[0]["reason"] == "bad_type:value"
+
+
+def _check_in(key, value, message, quote=None):
+    """引文是整条消息里的一段：范围按整条消息算。"""
+    op = {"op": "add", "key": key, "value": value, "evidence_quote": quote or message, "affects": "task_difficulty"}
+    if key.startswith("constraint:"):
+        op["valid_until"] = "2030-01-01"
+    return memory.validate_ops(store.create_user("t")["uid"], [op], [message])
+
+
+G = lambda s, y: {"stage": s, "year": y}  # noqa: E731
+Q = lambda v, u, p=None: {"value": v, "unit": u, **({"per": p} if p else {})}  # noqa: E731
+
+
+@pytest.mark.parametrize("key,value,message,quote", [
+    # 引文只截了值那一段，否定、过去、主语都在外面（Codex 复现）
+    ("grade", G("本科", 4), "我不是大四，是大二", "大四"),
+    ("age", Q(22, "岁"), "不是22岁，我刚成年", "22岁"),
+    ("interest:robotics", "机器人", "机器人我已经完全没兴趣了", "机器人"),
+    ("goal:phd", "读博", "毕业读博是别人给的建议，不是我的目标", "毕业读博"),
+    ("base:code", "会用 R", "我并不会用 R，只能照着同学代码跑", "会用 R"),
+    # 说的是别人（Codex 复现）
+    ("grade", G("本科", 2), "我室友大二，我是刚入学的新生", None),
+    ("age", Q(21, "岁"), "我姐今年21岁，我还没成年", None),
+    ("school", "清华大学", "我的高中同桌在清华，我们偶尔一起自习", None),
+    ("department", "数学科学学院", "同宿舍那位是数院的，我经常问他数学题", None),
+    ("goal:phd", "读博", "我妈妈希望我读博，这只是她的想法", None),
+    ("current:course", "在上计量经济学", "我朋友在上计量经济学，经常吐槽作业", None),
+    # 只是提到，不是学籍；附属机构；有别的意思的简称（Codex 复现）
+    ("school", "清华大学", "我今天读了一本清华大学出版社的教材", None),
+    ("school", "北京大学", "我弟在北大附中读高中，我的学籍还没说呢", None),
+    ("department", "法学院", "今天去法院旁听了一个案子，挺有意思", None),
+    ("major", "经济学", "我今天借了本经济学教材，专业还是英语", None),
+    ("major", "化学", "我是化学生物学专业的，不是化学专业", None),
+    ("enroll_year", Q(2021, "年"), "2021年我参加了高中数学竞赛", None),
+    ("pace", Q(4, "小时", "周"), "我每周上四小时体育课，科研时间另算", None),
+    # 打算、假设、过去（Codex 复现）
+    ("pace", Q(9, "小时", "周"), "我打算以后每周拿出九小时，目前还做不到", None),
+    ("interest:ml", "机器学习", "假如我喜欢机器学习，你会怎么安排路线？我只是举例", None),
+    ("current:course", "在上概率论", "我上学期在上概率论，已经结课了", None),
+    ("grade", G("本科", 2), "大二已经是过去的事了，我都快毕业了", None),
+    ("interest:ai", "人工智能", "人工智能是我去年的兴趣，现在换了", None),
+    # 否定的说法（Codex 复现）
+    ("grade", G("本科", 3), "我并不是现在大三，我才刚入学", None),
+    ("pace", Q(8, "小时", "周"), "我每周八小时真的拿不出来", None),
+    ("interest:rl", "强化学习", "强化学习我没兴趣😂", None),
+    ("goal:phd", "读博", "读博？我完全没这个打算", None),
+    ("major", "金融学", "金融学并不是我的专业，我只是选过一门课", None),
+    ("interest:systems", "操作系统", "我不喜欢数据库、网络，或者操作系统这几块", None),
+    ("capability:sql", "不会 SQL", "我会 SQL，课程项目天天用", None),
+    ("base:math", "数学很好", "数学不是很好，别高估我啊", None),
+    ("constraint:exam", "这周没考试", "我这周考试很多，几乎天天有", None),
+    # 改口隔着插话（Codex 复现）
+    ("grade", G("本科", 2), "我大二。等下。刚说错了，我已经大三了", None),
+    ("age", Q(19, "岁"), "我19岁。啊抱歉，刚才年龄说错了，我20岁", None),
+    ("school", "清华大学", "清华大学。啊我口误，是北京大学", None),
+    # 数量（Codex 复现）
+    ("age", "2025", "我2025年入学北大，读的是本科", None),
+    ("age", "20岁，已发表论文", "我今年20岁，本科就读", None),
+    ("pace", "五周", "这个项目总共五周，是学期中间那段", None),
+    ("pace", Q(2, "小时", "周"), "我总共就两小时能给这个一次性活动", None),
+    ("pace", Q(19, "小时", "周"), "每周十几小时吧，没算过具体多少", None),
+    ("pace", Q(6, "小时", "周"), "每周四到六小时，不一定能到上限", None),
+    ("pace", Q(5, "小时", "周"), "我每周不到五小时，很难挤出完整的五小时", None),
+    ("pace", Q(130, "分钟", "周"), "每周能投入两小时十分钟三十秒", None),
+    ("pace", Q(2006, "分钟", "月"), "每月两千六分钟，也就是2600分钟左右", None),
+    # 值里多出原话没有的东西（Codex 复现）
+    ("base:code", "精通 Java", "我会一点 JavaScript，刚开始做网页", None),
+    ("base:code", "编程能力非常扎实", "我刚开始学编程，这周还在找入门资料", None),
+    ("current:project", "正在开发大型推荐系统", "我在看推荐系统入门教程，项目还没开工", None),
+    ("interest:ml", "机器学习和量子化学", "我喜欢机器学习，对另一边的领域还没了解", None),
+])
+def test_review_round19_rejects(key, value, message, quote):
+    acc, rej = _check_in(key, value, message, quote)
+    assert acc == [], acc
+
+
+@pytest.mark.parametrize("key,value,message", [
+    ("age", Q(21, "岁"), "I am twenty-one years old, 本科在读。"),                 # 英文复合数（Codex 复现）
+    ("enroll_year", Q(2023, "年"), "我二三年入学北大，到现在还在探索专业方向"),   # 「二三年入学」是 2023（Codex 复现）
+    ("enroll_year", Q(2025, "年"), "两千零二十五年我来北大报到"),
+    ("pace", Q(20, "分钟", "天"), "我每天能花三分之一小时读文献"),               # 分之（Codex 复现）
+    ("pace", Q(1.5, "小时", "周"), "每周一点五小时是我的上限内可用时间"),         # 中文小数点（Codex 复现）
+    ("pace", Q(130.5, "分钟", "周"), "每周能投入两小时十分钟三十秒，番茄钟算的"),  # 三段时长（Codex 复现）
+    ("pace", Q(90, "分钟", "周"), "我每周一小时又半小时可以用"),
+    ("pace", "每周5小时", "我课余固定每周5小时能做实验"),                         # 「课余」不是课
+    ("department", "考古文博学院", "我属于考古文博学院，最近在整理出土数据"),
+    ("base:math_code", "数学比编程熟一点", "数学比编程熟一点，代码常常调不出来"),  # 在册 key 规范化后查不到（Codex 复现）
+    ("base:math", "学过高等数学", "我以前学过高等数学，知识记得一些"),            # 「学过」本来就是以前
+    ("interest:quantum", "量子计算", "我不是不喜欢量子计算，就是找不到入门材料"),
+])
+def test_review_round19_accepts(key, value, message):
+    acc, rej = _check_in(key, value, message)
+    assert len(acc) == 1, rej
+
+
+@pytest.mark.parametrize("n", [16000, 64000])
+def test_corrections_and_repeated_quotes_stay_linear(n):
+    """每个改口词都从句首重扫语气词：六万四千字要六秒（Codex 复现）；引文在长消息里重复出现也不逐处比。"""
+    text = "哦" * (n // 2) + "说错" * (n // 4) + "我大二"
+    t0 = time.perf_counter()
+    _check_in("grade", G("本科", 2), text)
+    nat = ("我是信管大二的，每周大概能投入10个小时，对机器学习感兴趣，不想碰前端，以前在物院，室友在清华。" * 2000)[:n]
+    ops = [{"op": "add", "key": k, "value": v, "evidence_quote": nat[:200], "affects": "task_difficulty"} for k, v in (
+        ("grade", G("本科", 2)), ("pace", Q(10, "小时", "周")), ("school", "清华大学"), ("department", "信息管理系"),
+        ("interest:ml", "机器学习"), ("base:code", "会Python"), ("current:x", "在修线性代数课程的作业"), ("age", Q(19, "岁")))]
+    memory.validate_ops(store.create_user("t")["uid"], ops, [nat])
+    assert time.perf_counter() - t0 < 3.0

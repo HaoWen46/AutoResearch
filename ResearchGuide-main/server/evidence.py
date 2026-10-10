@@ -28,28 +28,45 @@ def dec(x: float) -> str:
     return f"{x:.4f}".rstrip("0").rstrip(".")
 
 
+_PCT = re.compile(r"百分之([零〇一二两三四五六七八九十百]{1,6}|\d{1,3}(?:\.\d{1,2})?)")
+_FRAC_CN = re.compile(r"([一二两三四五六七八九十]{1,3}|\d{1,3})分之([一二两三四五六七八九十]{1,3}|\d{1,3})")
+
+
+def _frac_cn(m: re.Match) -> str:
+    a, b = (_tok_value(x) for x in (m[1], m[2]))
+    return dec(b[0] / a[0]) if a and b and a[0] else m[0]
+
+
+@lru_cache(maxsize=256)
 def prep(text: str) -> str:
-    """「1½」先整体算成 1.5（NFKC 会把它拼成「11⁄2」），再全角转半角、分数算成小数、英文转小写。
-    之后所有位置都按这份文本算。"""
+    """「1½」先整体算成 1.5（NFKC 会把它拼成「11⁄2」），再全角转半角、分数算成小数（「三分之一」也算，Codex 复现）、
+    「百分之八十」写成「八十%」、英文转小写。之后所有位置都按这份文本算；对 prep 过的文本再 prep 不变。"""
     t = _VULGAR.sub(lambda m: dec(int(m[1] or 0) + unicodedata.numeric(m[2])), str(text or ""))
     t = unicodedata.normalize("NFKC", t)
     t = _SLASH.sub(lambda m: dec(int(m[1]) / int(m[2])) if int(m[2]) else m[0], t)
+    t = _PCT.sub(lambda m: m[1] + "%", t)
+    t = _FRAC_CN.sub(_frac_cn, t)
     return t.translate(_ASCII_LOWER)
 
 
 # ---------- 分句和范围 ----------
 
-# 否定、过去、假设只管到这一分句为止；转折词也算断开（「以前是大一，现在大二」「不确定，但对 NLP 感兴趣」）
-_BOUNDARY = re.compile(r"[,，。;；!！?？:：\n\r]|\.(?!\d)|(?<![a-z])(?:but|however|though|although|whereas|instead)(?![a-z])"
-                       r"|但是|但|可是|不过|然而|而是|只是|却|现在|目前|如今")
+# 否定、过去、假设只管到这一分句为止；转折词也算断开（「不确定，但对 NLP 感兴趣」）。冒号不断：「我的专业是：经济学」是一句
+_BOUNDARY = re.compile(r"[,，。;；!！?？\n\r]|\.(?!\d)|(?<![a-z])(?:but|however|though|although|whereas|instead)(?![a-z])"
+                       r"|但是|但|可是|不过|然而|而是|只是|却")
+# 「现在」只截断过去（「以前是大一现在大二」）；原来它对否定也算断开，「我并不是现在大三」的否定被洗掉（Codex 复现）
+_NOW = re.compile(r"现在|目前|如今|(?<![a-z])now(?![a-z])")
+# 下一分句以并列词开头，否定接着管：「我不喜欢数据库、网络，或者操作系统」（Codex 复现）
+_CONT = re.compile(r"[ \t]*(?:或者|或是|还有|以及|也不|和|与|及|跟|或|(?<![a-z])(?:or|and|nor)(?![a-z]))")
 
-NEG, PAST, IRREALIS, CORRECTED = "neg", "past", "irrealis", "corrected"
-# 说的是不是他「现在的状态」：年级、学校院系、数量都要四样都不沾；兴趣和目标本来就是「想」，只查否定、过去、改口
-STATE = frozenset({NEG, PAST, IRREALIS, CORRECTED})
-WISH = frozenset({NEG, PAST, CORRECTED})
+NEG, PAST, IRREALIS, COND, CORRECTED, OTHER = "neg", "past", "irrealis", "cond", "corrected", "other"
+# 说的是不是他「现在的状态」：年级、学校院系、年龄和每周时间六样都不沾；
+# 兴趣和目标本来就是「想」，打算可以，但不能是否定、过去、假设（「假如我喜欢…」）、改口、别人的事
+STATE = frozenset({NEG, PAST, IRREALIS, COND, CORRECTED, OTHER})
+WISH = frozenset({NEG, PAST, COND, CORRECTED, OTHER})
 
 _EN_NEG = r"(?<![a-z])(?:not|no|never|neither|nor|without|except|cannot)(?![a-z])|n['’]t(?![a-z])"
-_NEG_FWD = re.compile(r"不再是|并不是|也不是|并非|不是|不算|算不上|谈不上|称不上|从来没有|从来没|从没有|从没|从未|未曾|毫无|没有|没|不|除了|除去|而非|"
+_NEG_FWD = re.compile(r"不再是|并不是|也不是|并非|不是|不算|算不上|谈不上|称不上|从来没有|从来没|从没有|从没|从未|未曾|毫无|很难|难以|没有|没|不|除了|除去|而非|"
                       + _EN_NEG)
 # 长得像否定、其实不是：程度和比较（不错、不到五小时）、关联词（不仅、不过）、客套、A不A 问句在下面单独判
 _NEG_PSEUDO = re.compile(r"不错|不少|不同|不断|不仅|不只|不止|不但|不过|不管|不论|不久|不然|不如|不得不|不禁|不免|不到|不超过|不足|不低于|不少于|"
@@ -60,20 +77,37 @@ _NEG_DOUBLE = re.compile(r"(?:不是|并非|并不是|没有|不能|不会|不�
 # 外层「不是」管着的范围里又有一个否定，而且不是「也不是」这种并列：「我不是对人工智能没有兴趣」
 _NEG_COPULA = ("不是", "并不是", "并非", "不再是")
 _COORD = re.compile(r"也|又|还|、|和|或|及")
-# 后置的否定：「对机器学习没有兴趣」「Python 我没学过」——只在分句末尾时往前管，管到这一分句开头或最近的「对」
-_NEG_BACK = re.compile(r"(?:没有?|毫无|不太?|并不|一点都不|一点也不|都不|也不)(?:什么|太大|多大|啥|太多|很大)?"
-                       r"(?:兴趣|感兴趣|喜欢|想学|想做|想碰|想搞|考虑|打算|会|懂|熟|熟悉|了解|学过|碰过|接触过|用过|写过|做过|好|行|擅长|在行|熟练|扎实|精通)"
-                       r"|(?:兴趣|好感)(?:都|也)?(?:没有?|不大)|无感|没感觉|不感冒|算了|一窍不通")
-_TAIL = re.compile(r"[了啊吧呢的呀哈过吗嘛啦哦耶 \t~～…]*")
-_PAST = re.compile(r"以前|之前|原来|原本|本来|去年|前年|曾经|当时|那时|那会儿?|上学期|上个学期|小时候|"
+# 后置的否定：「对机器学习没有兴趣」「Python 我没学过😂」——在分句末尾（后面只剩语气词、表情）时往前管，管到这一分句开头或最近的「对」
+_NEG_BACK = re.compile(r"(?:没有?|毫无|不太?|不是很|不怎么|不算|并不|一点都不|一点也不|都不|也不)(?:什么|太大|多大|啥|太多|很大|这个|那个)?"
+                       r"(?:兴趣|感兴趣|喜欢|想学|想做|想碰|想搞|考虑|打算|会|懂|熟|熟悉|了解|学过|碰过|接触过|用过|写过|做过|好|行|擅长|在行|熟练|扎实|精通|"
+                       r"在上|上过|修过|选上|在修|在做)"
+                       r"|(?:兴趣|好感)(?:都|也)?(?:没有?|不大)|无感|没感觉|不感冒|算了|一窍不通|(?:拿|挤|抽|腾)不出(?:来)?|做不到|达不到|不够")
+# 这几种不用在分句末尾：「金融学并不是我的专业，我只是选过一门课」（Codex 复现）
+_NEG_BACK_ANY = re.compile(r"(?:并不是|不是|并非)(?:我的)?(?:专业|学校|方向|兴趣|目标|菜|院系|学院|领域)")
+_TAIL = re.compile(r"(?:[了啊吧呢的呀哈过吗嘛啦哦耶~～…]|[^\w])*")
+_PAST = re.compile(r"以前|之前|原来|原本|本来|去年|前年|曾经|当时|那时|那会儿?|上学期|上个学期|上周|上个星期|上个月|小时候|"
                    r"(?<![a-z])(?:used to|last year|previously|formerly|back then|was|were)(?![a-z])")
 _PAST_PSEUDO = re.compile(r"本来就|原来如此|原来是这样")
-_IRREALIS = re.compile(r"(?<![思理感联回猜幻梦构妄])想(?!法)|打算|准备|计划|希望|将来|以后|未来|毕业后|如果|假如|要是|万一|争取|考虑|申请|报考|"
-                       r"考研|保研|(?<![a-z])(?:want|wants|plan|plans|hope|hopes|going to|will|would|if|apply|applying)(?![a-z])")
-# 改口：「大二，哦打错了我是大三」「我大二，不对，我大三」。「打错」这类在哪都算；「不对」「错了」只在分句开头算（「作业错了三题」不是改口）
-_CORR_ANY = re.compile(r"打错|说错|写错|输错|口误|笔误|更正一下|纠正一下|(?<![a-z])(?:i meant|typo|correction)(?![a-z])")
-_CORR_HEAD = re.compile(r"[哦噢啊呃嗯额哎诶唉 \t]*(?:不对|错了|说反了|sorry)(?=$|[我是应其啊吧呢哦嗯 \t])")
-_INTERJ = re.compile(r"[哦噢啊呃嗯额哎诶唉 \t]*")
+# 说一样东西是别人的意思：「毕业读博是别人给的建议」（Codex 复现）
+_OTHER_BACK = re.compile(r"是?(?:别人|家里|父母|爸妈|老师|导师|学长|学姐|室友|同学)(?:给|提|说|定|要求)?的(?:建议|想法|意见|要求|安排|期望|主意)")
+# 说一样东西「是过去的」：往前管到分句开头（「人工智能是我去年的兴趣」「大二已经是过去的事了」，Codex 复现）
+_PAST_BACK = re.compile(r"(?:去年|以前|之前|过去|曾经|小时候|高中)的(?:兴趣|事|爱好|专业|学校|方向|想法|目标|梦想)|过去的事|过去式|已经结课|结课了|全忘了|都忘了|"
+                        r"已经交了|提前交了")
+_IRREALIS = re.compile(r"(?<![思理感联回猜幻梦构妄])想(?!法)|打算|准备|计划|希望|将来|以后|未来|毕业后|等我|等到|明年|下学期|下个学期|争取|考虑|申请|报考|"
+                       r"考研|保研|(?<![a-z])(?:want|wants|plan|plans|hope|hopes|going to|will|would|apply|applying)(?![a-z])")
+_COND = re.compile(r"如果|假如|要是|万一|假设|若是|倘若|假使|(?<![a-z])(?:if|suppose|supposing)(?![a-z])")
+# 说的是别人：「我室友大二」「我妈妈希望我读博」「同组的学长会写 Python」（Codex 复现）。
+# 「跟室友一起」「在张老师组里」「跟着导师」是他自己的事，不算
+_OTHER = re.compile(r"室友|舍友|同学|同桌|朋友|闺蜜|学长|学姐|学弟|学妹|师兄|师姐|师弟|师妹|老师|导师|教授|助教|辅导员|爸爸|妈妈|我爸|我妈|父母|家长|"
+                    r"哥哥|姐姐|弟弟|妹妹|我哥|我姐|我弟|我妹|那位|这位|那个人|同宿舍的?|(?<![其吉])他们?|她们?|别人|大家|有人|"
+                    r"(?<![a-z])(?:my (?:friend|roommate|classmate|sister|brother|mom|dad|parents|advisor)|he|she|they)(?![a-z])")
+_OTHER_NOT = re.compile(r"组|课题组|实验室|的组|那边|那里|门下|一起")
+# 改口：「大二，哦打错了我是大三」「我大二。等下。说错了，我大三」。「打错」这类在哪都算；「不对」「错了」只在分句开头算（「作业错了三题」不是改口）。
+# 改口词前面只有语气词、「刚才」「年龄」这类，就往回越过「等下」「抱歉」这种插话，管到上一句实话（Codex 复现）
+_CORR_ANY = re.compile(r"打错|说错|写错|输错|口误|笔误|更正|纠正一下|(?<![a-z])(?:i meant|typo|correction)(?![a-z])")
+_CORR_HEAD = re.compile(r"(?:不对|错了|说反了|sorry)(?=$|[我是应其啊吧呢哦嗯 \t])")
+_CORR_PREFIX = re.compile(r"(?:[哦噢啊呃嗯额哎诶唉 \t]|我|刚才|刚刚|刚|之前|前面|上面|抱歉|不好意思|sorry|年龄|年级|学校|专业|院系|时间|数字|名字|那个|这个)*")
+_FILLER = re.compile(r"(?:[哦噢啊呃嗯额哎诶唉 \t!！]|等下|等一下|等等|停一下|稍等|抱歉|不好意思|sorry|wait|hmm)*")
 
 
 class Scope(NamedTuple):
@@ -91,6 +125,10 @@ class Scan(NamedTuple):
     by_cue: list[int]          # scopes 按 cue_start 排好的下标，找「提示词在这一处里面」用
     cue_starts: list[int]      # 和 by_cue 一一对应的 cue_start，二分用
     cover: dict[str, list[int]]  # 每种范围覆盖到每个位置的个数（差分数组求和）
+    starts: list[int]          # 每个分句的起点，二分找分句用
+
+    def clause(self, pos: int) -> tuple[int, int]:
+        return self.clauses[_clause_at(self.clauses, self.starts, pos)]
 
 
 def _clauses(t: str) -> list[tuple[int, int]]:
@@ -124,24 +162,42 @@ def _neg_cues(t: str) -> tuple[list[tuple[int, int]], set[int]]:
 
 @lru_cache(maxsize=32)  # 同一轮几条 op 共用一句原话；每条要存几个和原话一样长的数组，别多存
 def scan(text: str) -> Scan:
-    """把原话分句，标出否定、过去、假设、改口各自管到哪里。text 必须已经 prep 过。"""
+    """把原话分句，标出否定、过去、打算、假设、改口、别人的事各自管到哪里。text 必须已经 prep 过。每样都一遍扫完。"""
     t = text
     clauses = _clauses(t)
     starts = [a for a, _ in clauses]
+    n = len(clauses)
     scopes: list[Scope] = []
 
-    def clause_of(pos: int) -> tuple[int, int]:
-        return clauses[_clause_at(clauses, starts, pos)]
+    def clause_idx(pos: int) -> int:
+        return _clause_at(clauses, starts, pos)
 
-    des = [i for i, c in enumerate(t) if c == "的"]
+    # 「的」后面跟着数就不截（「挤不出完整的五小时」），否则否定管不到「的」后面被修饰的词（「不需要太多数学的机器学习」）
+    des = [i for i, c in enumerate(t) if c == "的" and not re.match(r"[0-9零〇一二两三四五六七八九十半]", t[i + 1:i + 2])]
+    nows = [m.start() for m in _NOW.finditer(t)]
+    cont_to = list(range(n))  # 从第 k 句起，并列的分句一直接到第几句
+    for k in range(n - 2, -1, -1):
+        if _CONT.match(t, clauses[k + 1][0]) and clauses[k + 1][0] < clauses[k + 1][1]:
+            cont_to[k] = cont_to[k + 1]
 
-    def fwd_end(e: int, cut_de: bool) -> int:
-        end = clause_of(e)[1]
-        if cut_de:  # 「不需要太多数学的机器学习」：否定管不到「的」后面被修饰的那个词
-            k = bisect.bisect_left(des, e)
-            if k < len(des) and des[k] < end:
-                end = des[k]
+    def fwd_end(e: int, kind: str) -> int:
+        k = clause_idx(e)
+        end = clauses[k][1]
+        if kind == NEG:
+            i = bisect.bisect_left(des, e)
+            if i < len(des) and des[i] < end:
+                return des[i]
+            return clauses[cont_to[k]][1]
+        if kind == PAST:
+            i = bisect.bisect_left(nows, e)
+            if i < len(nows) and nows[i] < end:
+                end = nows[i]
         return end
+
+    def topic(k: int, cs: int, ce: int) -> None:
+        # 「读博？我完全没这个打算」「清华大学？不是我的学校啊」：前一句是个问出来的话题，后一句的否定管到它（Codex 复现）
+        if k > 0 and clauses[k - 1][1] - clauses[k - 1][0] <= 15 and re.search(r"[?？]", t[clauses[k - 1][1]:clauses[k][0]]):
+            scopes.append(Scope(clauses[k - 1][0], clauses[k - 1][1], NEG, cs, ce))
 
     neg, cancelled = _neg_cues(t)
     neg_starts = [s for s, _ in neg]
@@ -149,7 +205,7 @@ def scan(text: str) -> Scan:
     for i, (s, e) in enumerate(neg):  # 外层「不是」里面又有否定、中间不是并列 → 两个都不算
         if t[s:e] not in _NEG_COPULA:
             continue
-        end = fwd_end(e, True)
+        end = fwd_end(e, NEG)
         j = bisect.bisect_left(neg_starts, e)
         if j < len(neg) and neg[j][0] < end and not _COORD.search(t, e, neg[j][0]):
             dead.update((i, j))
@@ -157,31 +213,56 @@ def scan(text: str) -> Scan:
     dead_at = {p for i in dead for p in range(*neg[i])} | cancelled
     for i, (s, e) in enumerate(neg):
         if i not in dead:
-            scopes.append(Scope(e, fwd_end(e, True), NEG, s, e))
-    for m in _NEG_BACK.finditer(t):
-        s, e = m.span()
-        a, b = clause_of(s)
-        if _TAIL.fullmatch(t, e, b) and s not in dead_at:
+            scopes.append(Scope(e, fwd_end(e, NEG), NEG, s, e))
+            topic(clause_idx(s), s, e)
+    for rx, final in ((_NEG_BACK, True), (_NEG_BACK_ANY, False)):
+        for m in rx.finditer(t):
+            s, e = m.span()
+            k = clause_idx(s)
+            a, b = clauses[k]
+            if s in dead_at or (final and not _TAIL.fullmatch(t, e, b)):
+                continue
             dui = t.rfind("对", a, s)
             scopes.append(Scope(dui if dui != -1 else a, s, NEG, s, e))
+            topic(k, s, e)
+            if not final and k > 0 and not t[a:s].strip():  # 「…是别人给的建议，不是我的目标」：没主语的这句说的是上一句
+                scopes.append(Scope(clauses[k - 1][0], clauses[k - 1][1], NEG, s, e))
     for m in _PAST.finditer(t):
         if not _PAST_PSEUDO.match(t, m.start()):
-            scopes.append(Scope(m.end(), fwd_end(m.end(), False), PAST, m.start(), m.end()))
-    for m in _IRREALIS.finditer(t):
-        scopes.append(Scope(m.end(), fwd_end(m.end(), False), IRREALIS, m.start(), m.end()))
+            scopes.append(Scope(m.end(), fwd_end(m.end(), PAST), PAST, m.start(), m.end()))
+    for m in _OTHER_BACK.finditer(t):
+        scopes.append(Scope(clauses[clause_idx(m.start())][0], m.start(), OTHER, m.start(), m.end()))
+    for m in _PAST_BACK.finditer(t):
+        scopes.append(Scope(clauses[clause_idx(m.start())][0], m.start(), PAST, m.start(), m.end()))
+    for rx, kind in ((_IRREALIS, IRREALIS), (_COND, COND)):
+        for m in rx.finditer(t):
+            scopes.append(Scope(m.end(), fwd_end(m.end(), kind), kind, m.start(), m.end()))
+    for m in _OTHER.finditer(t):
+        s, e = m.span()
+        if t[s - 1:s] in ("和", "跟", "与", "同", "在", "给") or t[s - 2:s] == "跟着" or _OTHER_NOT.match(t, e):
+            continue
+        scopes.append(Scope(e, clauses[clause_idx(e)][1], OTHER, s, e))
+
+    filler = [bool(_FILLER.fullmatch(t, a, b)) for a, b in clauses]
+    prefix_end = [_CORR_PREFIX.match(t, a, b).end() for a, b in clauses]  # 每句只算一次：原来每个改口词都从句首重扫一遍，平方级（Codex 复现）
+
+    def back_to(k: int) -> int:
+        j = k - 1
+        while j >= 0 and filler[j]:
+            j -= 1
+        return clauses[j][0] if j >= 0 else clauses[k][0]
+
     for k, (a, b) in enumerate(clauses):
-        h = _CORR_HEAD.match(t, a, b)
+        h = _CORR_HEAD.match(t, prefix_end[k], b)
         if h and k > 0:
-            scopes.append(Scope(clauses[k - 1][0], clauses[k - 1][1], CORRECTED, a, h.end()))
+            scopes.append(Scope(back_to(k), a, CORRECTED, h.start(), h.end()))
     for m in _CORR_ANY.finditer(t):
-        k = _clause_at(clauses, starts, m.start())
-        a = clauses[k][0]
-        if _INTERJ.fullmatch(t, a, m.start()) and k > 0:
-            a = clauses[k - 1][0]
+        k = clause_idx(m.start())
+        a = back_to(k) if m.start() <= prefix_end[k] else clauses[k][0]
         scopes.append(Scope(a, m.start(), CORRECTED, m.start(), m.end()))
 
     cover: dict[str, list[int]] = {}
-    for kind in (NEG, PAST, IRREALIS, CORRECTED):
+    for kind in (NEG, PAST, IRREALIS, COND, CORRECTED, OTHER):
         diff = [0] * (len(t) + 1)
         for sc in scopes:
             if sc.kind == kind and sc.end > sc.start:
@@ -193,20 +274,24 @@ def scan(text: str) -> Scan:
             acc.append(run)
         cover[kind] = acc
     by_cue = sorted(range(len(scopes)), key=lambda i: scopes[i].cue_start)
-    return Scan(t, clauses, scopes, by_cue, [scopes[i].cue_start for i in by_cue], cover)
+    return Scan(t, clauses, scopes, by_cue, [scopes[i].cue_start for i in by_cue], cover, starts)
+
+
+def kinds_at(sc: Scan, start: int, end: int, kinds: frozenset[str]) -> set[str]:
+    """这一处（start..end）落在哪几种范围里。提示词本身在这一处里面的不算（「不确定性量化」里的「不」）。"""
+    lo, hi = bisect.bisect_left(sc.cue_starts, start), bisect.bisect_left(sc.cue_starts, end)
+    cues = [c for c in (sc.scopes[i] for i in sc.by_cue[lo:hi]) if c.cue_end <= end]
+    out = set()
+    for p in range(start, min(max(end, start + 1), len(sc.text))):
+        for k in kinds - out:
+            n = sc.cover[k][p]
+            if n and n > sum(1 for c in cues if c.kind == k and c.start <= p < c.end):
+                out.add(k)
+    return out
 
 
 def affirmed(sc: Scan, start: int, end: int, kinds: frozenset[str]) -> bool:
-    """这一处（start..end）不在给定的几种范围里。提示词本身在这一处里面的不算（「不确定性量化」里的「不」）。"""
-    lo, hi = bisect.bisect_left(sc.cue_starts, start), bisect.bisect_left(sc.cue_starts, end)
-    cues = [c for c in (sc.scopes[i] for i in sc.by_cue[lo:hi]) if c.cue_end <= end]
-    for p in range(start, max(end, start + 1)):
-        if p >= len(sc.text):
-            break
-        n = sum(sc.cover[k][p] for k in kinds)
-        if n and n > sum(1 for c in cues if c.kind in kinds and c.start <= p < c.end):
-            return False
-    return True
+    return not kinds_at(sc, start, end, kinds)
 
 
 _POST_PAST = re.compile(r"的?(?:时候|时|那会儿?|那年|期间|毕业)")
@@ -307,10 +392,21 @@ def grade_mentions(t: str) -> list[Grade]:
     return out
 
 
-def current_grades(text: str) -> list[Grade]:
+class Windows(NamedTuple):
+    """同一句引文在整条消息里的几处（从前往后、一样长）。"""
+    starts: tuple[int, ...]
+    length: int
+
+    def contain(self, s: int, e: int) -> bool:
+        # 起点在 [e - 长度, s] 之间的那几处才可能包住 [s, e)：二分，长消息里引文重复出现也不逐个比
+        return bisect.bisect_right(self.starts, s) > bisect.bisect_left(self.starts, e - self.length)
+
+
+def current_grades(text: str, windows: Windows | None = None) -> list[Grade]:
+    """说的是现在的年级；给了 windows 只要落在其中某一段里的（位置按 prep 过的 text 算）。"""
     t = prep(text)
     sc = scan(t)
-    return [g for g in grade_mentions(t) if is_current(sc, g.start, g.end)]
+    return [g for g in grade_mentions(t) if (windows is None or windows.contain(g.start, g.end)) and is_current(sc, g.start, g.end)]
 
 
 BAD = object()  # 结构化的值形状不对
@@ -363,10 +459,10 @@ def render_grade(stage: str | None, year: int | None) -> str:
     return stage or f"{cn[(year or 1) - 1]}年级"
 
 
-def grade_supported(stage: str | None, year: int | None, quote: str) -> bool:
+def grade_supported(stage: str | None, year: int | None, quote: str, windows: Windows | None = None) -> bool:
     """原话里有一处说的是现在的年级，阶段和第几年都对得上。值写了第几年，原话就得说了同一年；
     原话没说阶段（「二年级」「second-year」）只撑得住本科（本产品默认本科生）或不写阶段的值。"""
-    for g in current_grades(quote):
+    for g in current_grades(quote, windows):
         if year is not None and g.year != year:
             continue
         if stage is None or g.stage == stage or (g.stage is None and stage == "本科"):
@@ -397,7 +493,13 @@ _PER_WORD = {"周": "w", "星期": "w", "礼拜": "w", "week": "w", "天": "d", 
 _EN_NUM = {w: i for i, w in enumerate(("zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten",
                                         "eleven", "twelve", "thirteen", "fourteen", "fifteen", "sixteen", "seventeen",
                                         "eighteen", "nineteen", "twenty"))} | {"thirty": 30, "forty": 40, "fifty": 50, "sixty": 60}
-_TOKEN = re.compile(r"半(?=[ \t]?(?:个[ \t]?)?(?:小时|钟头|天|年|月|学期|周|星期))|\d{1,9}(?:\.\d{1,4})?|[零〇一二两三四五六七八九十百千万几]{1,12}|(?<![a-z])(?:" + "|".join(_EN_NUM) + r")(?![a-z])")
+_EN_TENS = r"(?:twenty|thirty|forty|fifty|sixty)[ \t-](?:one|two|three|four|five|six|seven|eight|nine)"
+_TOKEN = re.compile(r"半(?=[ \t]?(?:个[ \t]?)?(?:小时|钟头|天|年|月|学期|周|星期))|\d{1,9}(?:\.\d{1,4})?|[零〇一二两三四五六七八九十百千万几]{1,12}(?:点[零〇一二三四五六七八九]{1,4})?"
+                    r"|(?<![a-z])(?:" + _EN_TENS + "|" + "|".join(_EN_NUM) + r")(?![a-z])")
+# 上下限不是定值：「每周不到五小时」撑不住「每周5小时」（Codex 复现）
+_BOUND_BEFORE = re.compile(r"(?:不到|不足|少于|低于|最多|至多|顶多|不超过|小于|最少|至少|超过|多于|大于|不少于)[ \t]?$")
+_BOUND_AFTER = re.compile(r"[ \t]?(?:以内|以下|之内|以上|出头|多一点|开外)")
+_ENROLL_AFTER = re.compile(r"[ \t]?(?:入学|入校|毕业|出生|级|届)")
 _RANGE = re.compile(r"[ \t]?(?:到|至|~|～|-|—|–|或)[ \t]?")
 _MOD = re.compile(r"[ \t]?(多|来|余)?(个)?(多)?(半)?[ \t]?")
 _JOIN = re.compile(r"[ \t]?(?:零|又)?[ \t]?")
@@ -419,11 +521,19 @@ class Qty(NamedTuple):
     per: str           # 「每周」= w；没说 = ""
     start: int
     end: int
-    ctx: str = ""      # 没带单位、但跟在「今年」「年龄」后面 = "age"
+    ctx: str = ""      # 没带单位、但跟在「今年」「年龄」后面 = "age"；四位的年份 = "calyear"
+    bound: str = ""    # 「不到」「最多」「以上」这类上下限 = "<" / ">"
 
 
 def _cn_value(run: str) -> tuple[float, float] | None:
     """中文数：「十九」「二十一」「两千零二十四」「二〇二四」；「三四」「两三」是范围、「十几」是 11 到 19。认不出返回 None。"""
+    if "点" in run:  # 「一点五」= 1.5
+        whole, frac = run.split("点", 1)
+        w = _cn_value(whole) if whole else (0.0, 0.0)
+        if not w or w[0] != w[1] or not all(c in _CN_D for c in frac):
+            return None
+        n = w[0] + float("0." + "".join(str(_CN_D[c]) for c in frac))
+        return n, n
     if "几" in run:
         m = re.fullmatch(r"([一二两三四五六七八九]?)十几", run)
         if not m:
@@ -441,6 +551,12 @@ def _cn_value(run: str) -> tuple[float, float] | None:
     m = re.fullmatch(r"([一二两三四五六七八九])([一二两三四五六七八九])十", run)
     if m and _CN_D[m[2]] == _CN_D[m[1]] + 1:
         return _CN_D[m[1]] * 10.0, _CN_D[m[2]] * 10.0
+    # 省略末位：「两千六」= 2600、「一百二」= 120、「一万二」= 12000（「两千零六」不省略）（原来算成 2006，Codex 复现）
+    if len(run) >= 3 and run[-1] in _CN_D and run[-2] in "百千万" and "零" not in run and "〇" not in run:
+        head = _cn_value(run[:-1])
+        if head:
+            n = head[0] + _CN_D[run[-1]] * {"百": 10, "千": 100, "万": 1000}[run[-2]]
+            return n, n
     total = section = cur = 0
     for c in run:
         if c in _CN_D:
@@ -464,6 +580,9 @@ def _tok_value(tok: str) -> tuple[float, float] | None:
         return float(tok), float(tok)
     if tok in _EN_NUM:
         return float(_EN_NUM[tok]), float(_EN_NUM[tok])
+    en = re.fullmatch(r"(\w+)[ \t-](\w+)", tok)
+    if en and en[1] in _EN_NUM and en[2] in _EN_NUM:  # 「twenty-one」
+        return float(_EN_NUM[en[1]] + _EN_NUM[en[2]]), float(_EN_NUM[en[1]] + _EN_NUM[en[2]])
     return _cn_value(tok)
 
 
@@ -481,7 +600,7 @@ def _unit_at(t: str, pos: int) -> str:
 def _per_before(t: str, start: int, clause_start: int) -> str:
     """数前面不远处的「每周」「一天」「weekly」；中间隔着别的数就不算这个数的（「每周2小时，总共20周」）。"""
     last = None
-    for m in _PER_BEFORE.finditer(t, max(clause_start, start - 10), start):
+    for m in _PER_BEFORE.finditer(t, max(clause_start, start - 16), start):
         last = m
     if last is None or _TOKEN.search(t, last.end(), start):
         return ""
@@ -489,9 +608,10 @@ def _per_before(t: str, start: int, clause_start: int) -> str:
     return "d" if word == "dai" else _PER_WORD.get(word, "")
 
 
-def quantities(text: str) -> list[Qty]:
-    """原话里的每个「数 + 单位」。复合时长（「一小时二十分钟」）只算总数；范围两头都算；没带单位的阿拉伯数字也算，
-    中文数要带单位、在括号里或跟在「今年」后面才算（「一些」不是 1）。逐个数往后看，不回溯。"""
+@lru_cache(maxsize=64)
+def quantities(text: str) -> tuple[Qty, ...]:
+    """原话里的每个「数 + 单位」。复合时长（「两小时十分钟三十秒」「一小时又半小时」）合成一个总数；范围留两头；没带单位的阿拉伯数字也算，
+    中文数要带单位、在括号里、有十百千或跟在「今年」后面才算（「一些」不是 1）。逐个数往后看，不回溯。同一句原话只解析一次。"""
     t = prep(text)
     clauses = _clauses(t)
     starts = [a for a, _ in clauses]
@@ -539,30 +659,46 @@ def quantities(text: str) -> list[Qty]:
             dim, factor = "pct", 1
         if unit == "年" and lo == hi and lo.is_integer() and 1900 <= lo <= 2100:
             dim, factor = "calyear", 1
+        elif unit == "年" and lo < 100 and _ENROLL_AFTER.match(t, upos + 1):  # 「二三年入学」「24年入学」
+            v = int("".join(str(_CN_D[c]) for c in tok)) if all(c in _CN_D for c in tok) else lo  # 「二三」这里是 23，不是两三
+            dim, factor, lo, hi = "calyear", 1, 2000.0 + v, 2000.0 + v
         elif unit == "级" and lo >= 10:
             dim, factor = "calyear", 1
             lo, hi = (lo + 2000 if lo < 100 else lo), (hi + 2000 if hi < 100 else hi)
         if dim in ("clock", "day", "month") and t[end:end + 1] == "半" and not half:  # 「一年半」「两天半」
             lo, hi, end = lo + 0.5, hi + 0.5, end + 1
         base_lo, base_hi = lo * factor, hi * factor
-        # 复合时长：后面紧跟同一量纲、更小的单位（「一小时二十分钟」「一年零三个月」）→ 合成一个总数
-        j = _JOIN.match(t, end)
-        m3 = _TOKEN.match(t, j.end())
-        if m3 and lo == hi and dim in ("clock", "day", "month"):
+        # 复合时长：后面一段接一段同一量纲、更小的单位，或者「又」连着同一单位，全部合成一个总数（原来只合两段，Codex 复现）
+        last = factor
+        while lo == hi and dim in ("clock", "day", "month"):
+            j = _JOIN.match(t, end)
+            m3 = _TOKEN.match(t, j.end())
+            if not m3:
+                break
             v3 = _tok_value(m3.group())
             mod3 = _MOD.match(t, m3.end())
             u3 = _unit_at(t, mod3.end())
-            if v3 and u3 and _UNIT[u3][0] == dim and _UNIT[u3][1] < factor and v3[0] == v3[1]:
-                base_lo = base_hi = base_lo + v3[0] * _UNIT[u3][1]
-                end = mod3.end() + len(u3)
-                lo = hi = base_lo / factor
+            if not (v3 and u3 and v3[0] == v3[1] and _UNIT[u3][0] == dim
+                    and (_UNIT[u3][1] < last or ("又" in j.group() and _UNIT[u3][1] == last))):
+                break
+            add = v3[0] + (0.5 if mod3.group(4) else 0.0)
+            end = mod3.end() + len(u3)
+            if t[end:end + 1] == "半":  # 「四十五分半」
+                add, end = add + 0.5, end + 1
+            base_lo = base_hi = base_lo + add * _UNIT[u3][1]
+            last = _UNIT[u3][1]
+        lo, hi = base_lo / factor, base_hi / factor
         per = _per_before(t, s, cl_a)
         pa = _PER_AFTER.match(t, end)
         if not per and pa:
             per = _PER_WORD.get(pa.group(1), "")
-        out.append(Qty(lo, hi, dim, base_lo, base_hi, unit, per, s, end))
+        bb = _BOUND_BEFORE.search(t, max(cl_a, s - 5), s)
+        ba = _BOUND_AFTER.match(t, end)
+        bound = ("<" if any(w in (bb or ba).group() for w in ("不到", "不足", "少于", "低于", "最多", "至多", "顶多", "不超过", "小于", "以内", "以下", "之内"))
+                 else ">") if (bb or ba) else ""
+        out.append(Qty(lo, hi, dim, base_lo, base_hi, unit, per, s, end, "", bound))
         skip_to = end
-    return out
+    return tuple(out)
 
 
 def _close(a: float, b: float) -> bool:
@@ -570,24 +706,24 @@ def _close(a: float, b: float) -> bool:
 
 
 def qty_match(want: Qty, have: Qty, strict: bool = False) -> bool:
-    """want（值里的）和 have（原话里的）是不是同一个量。值的每一头都得是原话那一处的一头。
-    strict：结构化的数量字段（年龄、入学年份、每周时间），量纲必须一样，不认「值带单位、原话光一个数」。"""
-    if not want.dim:
-        ends = {have.lo, have.hi}
-        return any(_close(want.lo, x) for x in ends) and any(_close(want.hi, x) for x in ends)
-    if not have.dim:
-        if strict and have.ctx != want.dim:
+    """want（值里的）和 have（原话里的）是不是同一个量。定值只对定值、范围只对同一个范围：「每周四到六小时」「十几小时」撑不住「6小时」「19小时」（Codex 复现）。
+    strict：结构化的数量字段（年龄、入学年份、每周时间），量纲必须一样（原话光一个数要有「今年」这类上下文），
+    值写了「每周」原话也得说了同一个「每…」，原话是上下限（「不到五小时」）不算。"""
+    if (want.lo == want.hi) != (have.lo == have.hi):
+        return False
+    if strict and (have.bound or (want.per and want.per != have.per)):
+        return False
+    if not want.dim or not have.dim:
+        if want.dim and strict and have.ctx != want.dim:
             return False
-        ends = {have.lo, have.hi}
-        return any(_close(want.lo, x) for x in ends) and any(_close(want.hi, x) for x in ends)
+        return _close(want.lo, have.lo) and _close(want.hi, have.hi)
     if want.dim != have.dim:
         return False
     if want.dim == "count" and want.label != have.label and "个" not in (want.label, have.label):
         return False  # 「个」和别的量词互通，「门」和「篇」不通
     if want.per and have.per and want.per != have.per:
         return False
-    ends = (have.base_lo, have.base_hi)
-    return any(_close(want.base_lo, x) for x in ends) and any(_close(want.base_hi, x) for x in ends)
+    return _close(want.base_lo, have.base_lo) and _close(want.base_hi, have.base_hi)
 
 
 def numbers_supported(value: str, quote: str) -> bool:
@@ -679,7 +815,7 @@ def entity_forms(key: str, value: str) -> tuple[str | None, set[str]]:
         name = _dept_of(v)
         if not name:
             return None, {v}
-        return name, {name, *(k for k, d in curriculum.DEPT_ALIAS.items() if d == name)}
+        return name, {name, *(k for k, d in curriculum.DEPT_ALIAS.items() if d == name and k not in _AMBIGUOUS)}
     names = _major_names(v)
     return (v, names) if names else (None, {v})
 
@@ -695,17 +831,57 @@ def _find(t: str, form: str) -> list[tuple[int, int]]:
     return [m.span() for m in re.finditer(body, t)]
 
 
-def entity_occurrences(key: str, value: str, quote: str) -> list[tuple[int, int]]:
+# 简称本身另有常见意思：「我去法院旁听」不是法学院（Codex 复现）
+_AMBIGUOUS = {"法院"}
+# 学校的附属机构不是学籍：「北大附中」「清华大学出版社」（Codex 复现）
+_SCHOOL_NOT = re.compile(r"附中|附小|附属|出版社|医院|校友")
+# 学校院系专业要跟学籍连着说：分句里（这个名字以外）得有「是、在、读、学、专业、的」这类词；「借了本经济学教材」只是提到（Codex 复现）
+_MEMBER = re.compile(r"是|在|读|念|就读|属于|隶属|来自|主修|辅修|学|专业|系|院|本科|硕士|博士|研究生|学生|大[一二三四五六]|研[一二三]|入学|毕业|交换|转|级|届|的"
+                     r"|(?<![a-z])(?:i'm|i am|at|from|study|studying|major|student|in)(?![a-z])")
+
+
+@lru_cache(maxsize=1)
+def _known_names() -> tuple[str, ...]:
+    """库里所有学校、院系、专业的叫法，长的在前。用来认「化学生物学」整个是一个专业、里面的「化学」不是另一个。"""
+    import curriculum
+    names = {prep(n) for name, short in SCHOOLS.items() for n in (name, *short)} | {prep(n) for n in curriculum.known_names()}
+    names |= _depts() | {v for c in curriculum.cards() for n in (c.get("专业", ""), c.get("目录专业名", "")) for p in str(n or "").split()
+                         for v in _variants(p)}
+    return tuple(sorted((n for n in names if len(n) >= 2), key=len, reverse=True))
+
+
+def _covered(t: str, s: int, e: int, longer: list[str]) -> bool:
+    """[s, e) 被原话里某个更长的名字整个包住。"""
+    for n in longer:
+        i = t.find(n, max(0, e - len(n)), s + len(n))
+        while i != -1:
+            if i <= s and e <= i + len(n):
+                return True
+            i = t.find(n, i + 1, s + len(n))
+    return False
+
+
+def entity_occurrences(key: str, value: str, quote: str, windows: Windows | None = None) -> list[tuple[int, int]]:
+    """这个学校/院系/专业在原话里作为学籍出现的每一处（给了 windows 只看落在里面的）：被更长的另一个名字包着的不算（「化学生物学」里的「化学」，Codex 复现）。"""
     t = prep(quote)
+    sc = scan(t)
     _, forms = entity_forms(key, value)
     out = []
     for f in forms:
+        longer = [n for n in _known_names() if len(n) > len(f) and f in n and n not in forms]
         for s, e in _find(t, f):
-            if key == "school" and any(t.find(c, max(0, s - len(c)), e + len(c)) != -1 for c in _CONFUSABLE.get(f, ())):
+            if windows is not None and not windows.contain(s, e):
+                continue
+            if key == "school" and (any(t.find(c, max(0, s - len(c)), e + len(c)) != -1 for c in _CONFUSABLE.get(f, ()))
+                                    or _SCHOOL_NOT.match(t, e) or (t.startswith("大学", e) and _SCHOOL_NOT.match(t, e + 2))):
                 continue
             if key == "department" and f in _SUBJECTS and not t.startswith(_DEPT_SUFFIX, e):
                 continue
-            out.append((s, e))
+            if _covered(t, s, e, longer):
+                continue
+            a, b = sc.clause(s)
+            if _MEMBER.search(t, a, s) or _MEMBER.search(t, e, b):
+                out.append((s, e))
     return out
 
 

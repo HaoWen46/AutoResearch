@@ -29,6 +29,8 @@ POOL = [
     "其实只想了解经济学",
     "我还是大一",
     "跟着教程跑过几遍",
+    "其实更想学数学",
+    "我在做选课数据大作业",
 ]
 
 
@@ -447,13 +449,15 @@ def test_slug_allows_hyphen_and_dot():
     """模型很自然会写 interest:machine-learning，这类 key 必须放行——
     否则丢的是用户真实说的话，不是垃圾数据。"""
     uid = make_user()
-    for key in ("interest:machine-learning", "goal:phd.app", "capability:python_3"):
-        acc, rej = memory.validate_ops(uid, ops(op("add", key, "AI", "想试试 AI")), POOL)
+    # 能力的引文得是能力：「想试试 AI」撑不住 capability「AI」（结构化闸门之后），这里换成原话里真说过的
+    for key, value, quote in (("interest:machine-learning", "AI", "想试试 AI"), ("goal:phd.app", "AI", "想试试 AI"),
+                              ("capability:python_3", "Python 只会抄", "Python 只会抄")):
+        acc, rej = memory.validate_ops(uid, ops(op("add", key, value, quote)), POOL)
         assert len(acc) == 1, f"{key} 应被接受，实际 {rej}"
     # 中文 slug 要放行：模型写 current:选课数据大作业 是很自然的，
     # 只放行 [a-z0-9_] 会把真实信息整条丢掉。
-    acc, rej = memory.validate_ops(uid, ops(op("add", "current:选课数据大作业", "在做这个大作业",
-                                               "我大二")), POOL)
+    acc, rej = memory.validate_ops(uid, ops(op("add", "current:选课数据大作业", "在做选课数据大作业",
+                                               "我在做选课数据大作业")), POOL)  # 原来拿「我大二」当证据，只因为都有个「大」
     assert len(acc) == 1, f"中文 slug 应被接受，实际 {rej}"
     # 仍然挡住标点、超长、以及规范化后为空的
     for bad in ("interest:bad!", "interest:" + "x" * 41, "interest:___"):
@@ -523,8 +527,9 @@ def test_apply_writes_fact_and_revision():
 def test_direction_is_exclusive():
     """方向互斥：选新方向后旧方向自动失效，M3 的分歧从根上消失。"""
     uid = make_user()
-    for code in ("ai", "math"):
-        acc, _ = memory.validate_ops(uid, ops(op("add", f"direction:{code}", code, "想试试 AI")), POOL)
+    # 值要有原话撑着：原来 direction:math 拿「想试试 AI」当证据，只因为 math 和 AI 都有字母 a
+    for code, value, quote in (("ai", "AI", "想试试 AI"), ("math", "数学", "其实更想学数学")):
+        acc, _ = memory.validate_ops(uid, ops(op("add", f"direction:{code}", value, quote)), POOL)
         memory.apply_ops(uid, acc, "d1")
 
     all_dirs = {f.key: f.status for f in store.list_facts(uid) if f.key.startswith("direction:")}

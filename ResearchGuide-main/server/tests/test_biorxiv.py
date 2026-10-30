@@ -374,12 +374,16 @@ def test_collect_without_source_uses_both_topics(monkeypatch):
         calls["biorxiv"] += 1
         return [_paper_dict(i) for i in range(3)]
 
+    import openalex
     monkeypatch.setattr("arxiv.recent", fake_arxiv)
     monkeypatch.setattr(biorxiv, "recent", fake_bio)
+    monkeypatch.setattr(openalex, "recent", lambda *a, **k: [{"id": "openalex:W1", "title": "Immune response review", "summary": "s",
+                                                             "authors": [], "published": "2024-01-01", "url": "https://doi.org/10.1/x",
+                                                             "categories": [], "source": "openalex"}])
     paper_collect.collect_node("310.34", quota=8, fulltext=0, xlate=False, metadata_only=True)
     assert calls["arxiv"] >= 1 and calls["biorxiv"] >= 1
     sources = {r["source"] for r in store.list_paper_dir("310.34")}
-    assert sources == {"arxiv", "biorxiv"}
+    assert sources == {"arxiv", "biorxiv", "openalex"}  # S2 起每个基础医学节点还有一个 OpenAlex 话题
 
 
 def test_admin_collect_endpoint_passes_source(monkeypatch):

@@ -16,6 +16,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import arxiv  # noqa: E402
 import biorxiv  # noqa: E402
+import openalex  # noqa: E402
 import sources  # noqa: E402
 import interests  # noqa: E402
 import logs  # noqa: E402
@@ -62,10 +63,13 @@ def _fetch_topic(tid: str, max_results: int = 40) -> tuple[list[dict[str, Any]],
             got = biorxiv.recent(spec.get("server") or "biorxiv", spec.get("biorxiv_category") or "",
                                  spec.get("en") or [], max_results=max_results)
             return got or [], ""
+        if spec.get("source") == "openalex":
+            got = openalex.recent(spec.get("subfields") or [], spec.get("en") or [], max_results=max_results)
+            return got or [], ""
         got = arxiv.recent(spec.get("categories") or [], spec.get("en") or [],
                            max_results=max_results) or []
         return got, ""
-    except (arxiv.ArxivError, osf.OsfError, biorxiv.BiorxivError) as exc:
+    except sources.ERRORS as exc:
         if spec.get("source") == "osf":
             _pause()
         return [], str(exc)

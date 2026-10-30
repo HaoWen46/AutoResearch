@@ -240,8 +240,8 @@ def papers_collect(request: Request, node: str = "", quota: int = 20, fulltext: 
         raise HTTPException(400, "quota 须在 1–50")
     if fulltext < 0 or fulltext > quota:
         raise HTTPException(400, "fulltext 须在 0–quota")
-    if source not in ("", "arxiv", "osf", "biorxiv", "medrxiv"):
-        raise HTTPException(400, "source 只认 arxiv / osf / biorxiv / medrxiv")
+    if source not in ("", "arxiv", "osf", "biorxiv", "medrxiv", "openalex"):
+        raise HTTPException(400, "source 只认 arxiv / osf / biorxiv / medrxiv / openalex")
     import paper_collect
     if not store.try_collect_lock(max_seconds):
         raise HTTPException(409, "采集正在跑")

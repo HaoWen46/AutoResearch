@@ -2010,19 +2010,28 @@ async def papers_search(q: str, uid: str):
     await run_in_threadpool(_user_or_404, uid)
     if not auth._allow(f"search:{uid}", 30):
         raise HTTPException(429, "搜索太勤，过一会儿再试")
-    if reading.arxiv.ZH_RE.search(q or ""):
-        raise HTTPException(400, "arXiv 只认英文关键词")
     lib_items = await run_in_threadpool(reading.search_library, q, 20)
     got: list = []
-    upstream_error = ""
-    if len(lib_items) < 20:
+    errors: list[str] = []
+    need = 20 - len(lib_items)
+    if need > 0:
+        # 库内不够：英文先问 arXiv（理工的主场），再用 OpenAlex 补全学科；中文只有 OpenAlex 认
         key = tuple((q or "").lower().split())
-        try:
-            got = await _shared(("search", key), reading.arxiv.search, q, 20 - len(lib_items))
-        except Exception as exc:
-            if not lib_items:
-                raise HTTPException(502, str(exc) or "搜索上游失败") from exc
-            upstream_error = str(exc)
+        if not reading.arxiv.ZH_RE.search(q or ""):
+            try:
+                got = list(await _shared(("search", key), reading.arxiv.search, q, need) or [])
+            except Exception as exc:
+                errors.append(str(exc))
+        if len(got) < need:
+            have = {p.get("id") for p in got}
+            try:
+                more = await _shared(("search", ("openalex",) + key), reading.openalex.search, q, need - len(got)) or []
+                got.extend(p for p in more if p.get("id") not in have)
+            except Exception as exc:
+                errors.append(str(exc))
+        if errors and not lib_items and not got:
+            raise HTTPException(502, errors[0] or "搜索上游失败")
+    upstream_error = "；".join(e for e in errors if e) if (errors and (lib_items or got)) else ""
     seen = {it.get("id") for it in lib_items}
     live_lib = store.paper_lib([p.get("id") for p in got or []])
     items = list(lib_items)

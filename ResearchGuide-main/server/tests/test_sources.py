@@ -60,7 +60,8 @@ def test_kind_clean_and_slash_free_refs():
     assert sources.kind(BIO_ID) == "biorxiv" and sources.clean("10.1101/2024.12.06.627082") == BIO_ID
     assert sources.kind("local:0123456789ab") == "local" and sources.is_local("local:0123456789ab")
     assert sources.clean(" local:0123456789ab ") == "local:0123456789ab"
-    for bad in ("openalex:W1", "10.1257/aer.20201545", "hep-th/9901001", ""):
+    assert sources.kind("openalex:W1") == "openalex" and sources.clean("https://openalex.org/W1") == "openalex:W1"
+    for bad in ("10.1257/aer.20201545", "hep-th/9901001", ""):  # 带斜杠的 DOI、老式 arXiv 号都不是 ref
         with pytest.raises(arxiv.ArxivError):
             sources.clean(bad)
 

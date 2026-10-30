@@ -18,6 +18,7 @@ from typing import Any
 import arxiv
 import biorxiv
 import interests
+import openalex
 import osf
 import sources
 import quotes
@@ -196,12 +197,14 @@ def topic_source(topic_id: str, cached_only: bool = False) -> tuple[list[dict[st
         elif spec.get("source") == "biorxiv":
             papers = biorxiv.recent(spec.get("server") or "biorxiv", spec.get("biorxiv_category") or "",
                                     spec.get("en") or [], max_results=25) or []
+        elif spec.get("source") == "openalex":
+            papers = openalex.recent(spec.get("subfields") or [], spec.get("en") or [], max_results=25) or []
         else:
             papers = arxiv.recent(spec.get("categories") or [], spec.get("en") or [], max_results=50) or []
         store.put_paper_pool(topic_id, day, papers)
         schedule_xlate(papers[:12], spec)
         return papers, "", False
-    except (arxiv.ArxivError, osf.OsfError, biorxiv.BiorxivError) as exc:
+    except sources.ERRORS as exc:
         if old:
             return old["papers"], str(exc), True
         return [], str(exc), False

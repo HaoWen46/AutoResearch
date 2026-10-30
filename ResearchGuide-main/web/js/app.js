@@ -4958,7 +4958,7 @@ async function renderRead() {
   rightH.appendChild(readTabs(tab));
   const search = el("form", "read-search");
   const q = el("input");
-  q.placeholder = "搜论文（英文关键词）";
+  q.placeholder = "搜论文（中英文都行）";
   q.name = "q";
   const goSearch = el("button", "btn small", "搜索");
   goSearch.type = "submit";
@@ -5045,7 +5045,7 @@ async function renderRead() {
       leftBody.appendChild(back);
     }
     if (!papers.length) {
-      leftBody.appendChild(el("p", "panel-sub", fromSearch ? "没有搜索结果。可调整英文关键词。" : "暂未找到符合当前目标的论文，可继续搜索或浏览方向。"));
+      leftBody.appendChild(el("p", "panel-sub", fromSearch ? "没有搜索结果。换个说法试试。" : "暂未找到符合当前目标的论文，可继续搜索或浏览方向。"));
       return;
     }
     const list = el("ol", "kit-papers");
@@ -5140,7 +5140,6 @@ async function renderRead() {
     ev.preventDefault();
     const term = q.value.trim();
     if (!term) return;
-    if (/[\u4e00-\u9fff]/.test(term)) { toast("arXiv 只认英文"); return; }
     try {
       const r = await api("GET", `/api/papers/search?q=${encodeURIComponent(term)}&uid=${S.uid}`);
       paintPapers(r.items || [], true);
@@ -5574,9 +5573,9 @@ let paperRenderEpoch = 0;
 function sourceLabel(aid) {
   const s = String(aid || "");
   if (s.startsWith("local:")) return "导入 PDF";
-  const m = s.match(/^(psyarxiv|socarxiv|biorxiv|medrxiv):/i);
+  const m = s.match(/^(psyarxiv|socarxiv|biorxiv|medrxiv|openalex):/i);
   if (!m) return "arXiv";
-  return { psyarxiv: "PsyArXiv", socarxiv: "SocArXiv", biorxiv: "bioRxiv", medrxiv: "medRxiv" }[m[1].toLowerCase()];
+  return { psyarxiv: "PsyArXiv", socarxiv: "SocArXiv", biorxiv: "bioRxiv", medrxiv: "medRxiv", openalex: "DOI" }[m[1].toLowerCase()];
 }
 function paperHome(aid, url) {
   if (url) return url;
@@ -5586,6 +5585,8 @@ function paperHome(aid, url) {
   if (m) return `https://osf.io/${m[2]}/`;
   m = s.match(/^(biorxiv|medrxiv):(10\.\d{4,5})\.(.+)$/i);
   if (m) return `https://www.${m[1].toLowerCase()}.org/content/${m[2]}/${m[3]}`;
+  m = s.match(/^openalex:(W\d+)$/i);
+  if (m) return `https://openalex.org/${m[1].toUpperCase()}`;
   return "";
 }
 

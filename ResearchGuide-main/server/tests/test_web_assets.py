@@ -494,7 +494,7 @@ def test_soon_rooms_hidden_and_pass_copy():
 def test_read_list_zh_first_and_search_placeholder():
     js = (WEB / "js" / "app.js").read_text(encoding="utf-8")
     assert "kp-en" in js
-    assert "搜论文（英文关键词）" in js
+    assert "搜论文（中英文都行）" in js
 
 
 def test_tutor_draft_key_and_resume_gate_present():

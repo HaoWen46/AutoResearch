@@ -13,9 +13,9 @@ NODE = shutil.which("node")
 def test_web_copy_r3_strings():
     js = APP_JS.read_text(encoding="utf-8")
     for s in ("推荐论文", "我的阅读卡", "对比表", "有全文", "译名待校", "splitZhTitle", "挑几篇论文",
-              "先选一个方向，才知道给你推哪些论文。", "方向基础练习 · 可选", "打开方向练习", "搜论文（英文关键词）"):
+              "先选一个方向，才知道给你推哪些论文。", "方向基础练习 · 可选", "打开方向练习", "搜论文（中英文都行）"):
         assert s in js, s
-    for s in ("还没有能用来检索的兴趣话题", "arXiv 只认英文关键词", '"库内"'):
+    for s in ("还没有能用来检索的兴趣话题", "arXiv 只认英文关键词", "arXiv 只认英文", '"库内"'):
         assert s not in js, s
 
 

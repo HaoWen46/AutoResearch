@@ -4,6 +4,7 @@
 ref 的形状（都不带斜杠：FastAPI 路径 `{arxiv_id}` 和磁盘缓存文件名吃不下 DOI 的 `/`）：
   2310.17623                    arxiv（裸 id，兼容所有旧数据）
   psyarxiv:xxxxx / socarxiv:…   osf（PsyArXiv / SocArXiv 预印本，正文是 PDF 抽文）
+  openalex:W123                 openalex（全学科目录；作品挂在 arXiv 上的在入口就归一成裸 arXiv id）
   biorxiv:10.1101.… / medrxiv:… biorxiv（DOI 里的 / 写成 .，见 biorxiv.clean_id）
   local:<sha12>                 用户自己导入的 PDF，只本人可见，走 store.get_user_paper，不在这里取
 新来源（openalex:W…、pmc:PMC…、nber:w…）只加在这个文件里。
@@ -20,12 +21,13 @@ from typing import Any
 
 import arxiv
 import biorxiv
+import openalex
 import osf
 import store
 
-ERRORS = (arxiv.ArxivError, osf.OsfError, biorxiv.BiorxivError)
+ERRORS = (arxiv.ArxivError, osf.OsfError, biorxiv.BiorxivError, openalex.OpenAlexError)
 LABELS = {"arxiv": "arXiv", "psyarxiv": "PsyArXiv", "socarxiv": "SocArXiv",
-          "biorxiv": "bioRxiv", "medrxiv": "medRxiv", "local": "导入 PDF"}
+          "biorxiv": "bioRxiv", "medrxiv": "medRxiv", "openalex": "DOI", "local": "导入 PDF"}
 _BIO_RE = re.compile(r"^(biorxiv|medrxiv):(10\.\d{4,5})\.(.+)$", re.I)
 
 
@@ -42,6 +44,8 @@ def kind(raw: str) -> str:
         return "biorxiv"
     if osf.is_id(s):
         return "osf"
+    if openalex.is_id(s) or openalex._W_RE.match(s):
+        return "openalex"
     return "arxiv"
 
 
@@ -57,6 +61,8 @@ def clean(raw: str) -> str:
         return biorxiv.clean_id(raw)
     if k == "osf":
         return osf.clean_id(raw)
+    if k == "openalex":
+        return openalex.clean_id(raw)
     return arxiv.clean_id(raw)
 
 
@@ -74,6 +80,8 @@ def landing_url(ref: str, url: str = "") -> str:
         return f"https://arxiv.org/abs/{ref}"
     if k == "osf":
         return f"https://osf.io/{ref.split(':', 1)[1]}/"
+    if k == "openalex":
+        return f"https://openalex.org/{ref.split(':', 1)[1]}"
     m = _BIO_RE.match(ref or "")
     if m:
         return f"https://www.{m.group(1).lower()}.org/content/{m.group(2)}/{m.group(3)}"
@@ -110,8 +118,8 @@ def fulltext(ref: str, hint: dict[str, Any] | None = None) -> dict[str, Any]:
         return arxiv.fulltext(ref, hint=hint) if hint else arxiv.fulltext(ref)
     if k == "biorxiv":
         return biorxiv.fulltext(ref)
-    if k == "osf":
-        got = osf.fulltext(ref)
+    if k in ("osf", "openalex"):
+        got = osf.fulltext(ref) if k == "osf" else openalex.fulltext(ref)
         if has_fulltext(got):
             try:
                 store.put_paper_text(clean(ref), got)

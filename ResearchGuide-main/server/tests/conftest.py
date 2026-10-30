@@ -39,6 +39,17 @@ def _no_real_model_keys(monkeypatch):
         monkeypatch.delenv(k, raising=False)
 
 
+@pytest.fixture(autouse=True)
+def _no_live_openalex(monkeypatch):
+    """测试里不打 OpenAlex：话题表里经济 / 心理 / 基础医学每个节点都有一个 OpenAlex 话题，
+    今日、目录收集一跑就会出网。默认把网络层换成「连不上」，要真形状的测试自己换 openalex.fetch。"""
+    import openalex
+
+    def offline(req, timeout=20, max_bytes=0, idle=None):
+        raise OSError("offline test")
+    monkeypatch.setattr(openalex, "fetch", offline)
+
+
 @pytest.fixture
 def real_llm(monkeypatch):
     """把 llm.enabled 换回真的（有几个测试文件在 import 时把它永久换成了 False）。"""

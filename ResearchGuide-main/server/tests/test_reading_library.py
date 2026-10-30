@@ -128,13 +128,18 @@ def test_search_route_not_shadowed(client, monkeypatch):
     assert "card_kit" in r.json()["items"][0]
 
 
-def test_search_rejects_chinese_and_cleans_terms(client):
+def test_search_chinese_goes_to_openalex_and_arxiv_module_still_rejects(client, monkeypatch):
+    import openalex
+    seen = []
+    real_arxiv_search = arxiv.search
+    monkeypatch.setattr(openalex, "search", lambda q, n=20: seen.append(q) or [])
+    monkeypatch.setattr(arxiv, "search", lambda q, n=20: (_ for _ in ()).throw(AssertionError("中文不该问 arXiv")))
     uid, h = _user("zh")
     r = client.get(f"/api/papers/search?q=稀疏注意力&uid={uid}", headers=h)
-    assert r.status_code == 400
-    assert "英文" in r.text
+    assert r.status_code == 200, r.text  # 原来 400「arXiv 只认英文关键词」
+    assert r.json()["items"] == [] and seen == ["稀疏注意力"]
     with pytest.raises(arxiv.ArxivError) as exc:
-        arxiv.search("稀疏注意力")
+        real_arxiv_search("稀疏注意力")
     assert exc.value.status == 400
 
 

@@ -1923,7 +1923,9 @@ def get_paper_dir_item(paper_id: str) -> dict[str, Any] | None:
 
 
 def search_paper_dir(q: str, limit: int = 20) -> list[dict[str, Any]]:
-    toks = [t.lower() for t in re.findall(r"[A-Za-z0-9][A-Za-z0-9.\-]{0,30}", q or "") if len(t) >= 2][:6]
+    toks = [t.lower() for t in re.findall(r"[A-Za-z0-9][A-Za-z0-9.\-]{0,30}", q or "") if len(t) >= 2]
+    toks += [t for t in re.findall(r"[\u4e00-\u9fff]{2,}", q or "")]  # 中文按连续串整体 LIKE（OpenAlex 的 zh 记录标题是中文）
+    toks = toks[:6]
     if not toks:
         return []
     where = " AND ".join(["(lower(title) LIKE ? OR lower(summary) LIKE ?)" for _ in toks])

@@ -72,6 +72,8 @@ function api(method, url, body) {
 }
 
 eval(extract("rememberTutor"));
+eval(extract("sourceLabel"));
+eval(extract("paperHome"));
 eval(extract("lastTutor"));
 eval(extract("applyTutorPrefill"));
 eval(extract("pickBenchMode"));
@@ -270,6 +272,8 @@ function paperHarness(cfg = {}) {
   eval(extract("stale"));
   eval(extract("splitZhTitle"));
   eval(extract("rememberTutor"));
+  eval(extract("sourceLabel"));
+  eval(extract("paperHome"));
   eval(extract("lastTutor"));
   eval(extract("tutorPanel"));
   eval(extract("render"));

@@ -277,6 +277,15 @@ def papers_warm(request: Request, budget: int = 240):
     return {"done": done, "failed": failed, "remaining": remaining}
 
 
+@router.get("/api/admin/sources/probe")
+def sources_probe(request: Request, timeout: float = 8.0):
+    """从这台机器（函数计算实例）出去，各论文来源一次最小请求：状态码与耗时。
+    上线前跑一次，境内可达性以这个为准（本机能通不代表云上能通）。"""
+    _admin(request)
+    import sources
+    return {"checked_at": now_iso(), "sources": sources.probe(timeout=max(1.0, min(float(timeout), 20.0)))}
+
+
 @router.get("/api/admin/stats")
 def stats(request: Request):
     _admin(request)

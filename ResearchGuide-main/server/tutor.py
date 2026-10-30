@@ -12,6 +12,7 @@ import arxiv
 import llm
 import quotes
 import reading
+import sources
 import skills
 import store
 from schemas import now_iso
@@ -556,12 +557,12 @@ def _require(uid: str, kit_id: str, aid: str) -> tuple[dict[str, Any], dict[str,
             raise TutorError("没有这篇")
         k = reading.kits().get(kit_id) or {"id": kit_id or "", "name": "", "papers": [], "dimensions": []}
         return k, {**paper, "id": aid, "source": "pdf"}, aid
-    aid = arxiv.clean_id(aid)
+    aid = sources.clean(aid)
     try:
         k = reading.kit(kit_id)
     except reading.ReadingError:
         k = {"id": kit_id or "", "name": "", "papers": [], "dimensions": []}
-    paper = arxiv.cached(aid) or arxiv.fulltext(aid)
+    paper = sources.cached(aid) or sources.fulltext(aid)
     return k, paper, aid
 
 

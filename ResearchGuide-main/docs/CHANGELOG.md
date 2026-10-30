@@ -6,6 +6,14 @@
 
 ---
 
+## [2026-10-31] [架构] 论文来源分发层 sources.py：OSF / bioRxiv 论文能打开能带读，来源标签按 ref 推导，管理员可达性探针
+
+- 变更内容：新增 `server/sources.py`（`kind / clean / cached / fulltext / label / landing_url / probe`），`main.py`（`/api/papers/{id}`、`_paper_ref`、带读三条路由、交卡）、`reading.py`（`warm_fetch`、分拣、交卡、简报）、`tutor.py`（`_require`）、`paper_collect.py`（正文循环）改为经它分派，不再各写 arXiv / OSF / bioRxiv 的 if 链。修掉两处旧病：PsyArXiv 论文点「带读答题」返回 400（`arxiv.clean_id` 拒掉前缀）、`GET /api/papers/psyarxiv:…` 只读库不取正文；取不到正文而目录里有摘要时给摘要。新增 `GET /api/admin/sources/probe`：从函数计算实例并行打一遍 arXiv / OSF / bioRxiv / OpenAlex / Europe PMC / NBER / Crossref，返回状态码和耗时（上线前跑，境内可达性以此为准）。前端论文页：来源标签与原文链接由 ref 前缀推导（`sourceLabel` / `paperHome`），OSF/bioRxiv 的 PDF 正文写「正文来自 PDF，引文可逐字核对」而不是「你导入的 PDF」，列表「有全文」徽标把 PDF 正文也算上。界面版本 w115。
+- 影响文档：docs/DEPLOY.md（新节「论文来源可达性」）、docs/CHANGELOG.md
+- 影响模块：server/sources.py、server/main.py、server/reading.py、server/tutor.py、server/paper_collect.py、server/admin.py、web/js/app.js、web/index.html、tools/verify/verify_tutor_render.js、server/tests/test_sources.py、server/tests/test_web_copy_sources.py
+- 决策来源：owner 2026-10-24「依赖 arXiv 对多数学科没用」；本地工作单 docs/tasks/31 的 S1（S2 接 OpenAlex 作全学科目录与搜索底座）
+- 登记人：陈浩文（Claude Code）
+
 ## [2026-10-24] [UX] 登录页同意行跟标签走；访客入口改短；过线改合格
 
 - 变更内容：合入 PR #35 前端提示。登录同意行不再钉在页头，跟着当前标签插到「登录 / 注册 / 微信 / 访客」按钮正上方（勾完就能点）；访客入口改成「访客模式」，点开后同意行进访客框。隐私勾选旁写「已阅读」+ 仍保留「同意按这个方式保存」短说明。界面不再写「过线」（阅读卡上一版、矩阵门槛改「合格」）；今日侧栏「每日文献速递」、分拣标题「分拣最近的新论文」；对话副标题改成「聊一聊你的大概情况」。第四轮两个去向按钮（「开始今天的一件事」「先挑一篇论文读」）和短版本戳留下。界面 w108。

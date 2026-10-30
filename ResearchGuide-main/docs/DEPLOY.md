@@ -77,6 +77,10 @@ python publish_gh_pages.py   # 提交信息带 wNN 和源 sha
 
 前端：`python tools/deploy/publish_gh_pages.py`。组装目录先清空，文件清单从 `index.html` 的 `static/` 引用解析。
 
+## 论文来源可达性（上线前跑一次）
+
+- `GET /api/admin/sources/probe`（带 `X-Admin-Token`）从函数计算实例出去各打一次 arXiv / OSF / bioRxiv / OpenAlex / Europe PMC / NBER / Crossref，返回状态码和毫秒。本机能通不代表云上能通；`ok: false` 的来源目录仍可读（库内），只是不再更新。
+
 ## 待确认（控制台 / 钉钉 / RAM，未做完不要假装已挂盘）
 
 **本轮（request-10-16）A5 状态：待确认。NAS 未挂上，不准假装已挂盘，不准把生产发版写成已完成。没挂盘前不要为了演示去发生产（发版会清 `/tmp` 库）。`refuse_unsafe` 已拦 `/private/tmp` 与未挂载的 `/data`；发版脚本会断言 `health.db.ephemeral=false`。两次发版后 `qiyan_users` 不变：仍待挂盘后验收。Pages 若已发到 w83，现网 API 仍是 w74，新页面打旧接口的 P0 未解除。**

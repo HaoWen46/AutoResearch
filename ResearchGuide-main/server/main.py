@@ -53,6 +53,7 @@ import positioning
 import projects
 import quotes
 import reading
+import sources
 import recommendations
 import store
 import submission
@@ -1725,8 +1726,9 @@ def _reading(fn, *args):
         return fn(*args)
     except (reading.ReadingError, positioning.PositionError) as exc:
         raise HTTPException(400, str(exc)) from exc
-    except reading.arxiv.ArxivError as exc:
-        raise HTTPException(400 if getattr(exc, "status", 0) == 400 else 502, str(exc)) from exc
+    except sources.ERRORS as exc:
+        st = getattr(exc, "status", 0)
+        raise HTTPException(400 if st == 400 else (404 if st == 404 else 502), str(exc)) from exc
 
 
 # 共享的活按种类分开线程池：arXiv 要排限速锁（每次至少隔 3 秒），几篇不同的论文就能把线程全占在等锁上；
@@ -1754,22 +1756,24 @@ async def _shared(key: tuple, fn, *args):
 
 
 def _payload_of(p: dict) -> dict:
+    strict = p.get("source") == "pdf"  # PDF 抽文的标题行只认「N Title」，和带读分站一致
     return {**p, "tables": p.get("tables") or [],
-            "sections": [{"name": n, "label": reading.arxiv.section_cn(n), "at": at} for n, at in reading.arxiv.sections(p["text"])]}
+            "sections": [{"name": n, "label": n if n.startswith("第") else reading.arxiv.section_cn(n), "at": at}
+                         for n, at in reading.arxiv.sections(p["text"], strict=strict)]}
 
 
 def _paper_payload(aid: str) -> dict:
-    return _payload_of(reading.arxiv.fulltext(aid))
+    return _payload_of(sources.fulltext(aid))
 
 
 def _paper_cached(aid: str) -> dict | None:
-    p = reading.arxiv.cached(aid)
+    p = sources.cached(aid)
     return None if p is None else _payload_of(p)
 
 
 def _paper_index(aid: str) -> None:
     """交卡之前先把这篇论文的引文索引和分节建好：并发交同一篇时，跟随者在事件循环里等，不在评阅线程里干等。"""
-    text = reading.arxiv.fulltext(aid)["text"]
+    text = sources.fulltext(aid)["text"]
     quotes.prepare(text)
     reading.arxiv.sections(text)
 
@@ -2095,40 +2099,23 @@ async def paper_text(arxiv_id: str, request: Request):
         return {**paper, "lib_at": "user", "tables": [],
                 "sections": [{"name": n, "label": n if n.startswith("第") else reading.arxiv.section_cn(n), "at": at}
                              for n, at in reading.arxiv.sections(text, strict=True)]}
-    if osf.is_id(arxiv_id):
-        aid = osf.clean_id(arxiv_id)
-        row = store.get_paper_text(aid)
-        if row and (row.get("text") or "") and row.get("source") in ("html", "pdf"):
-            return {**row, "lib_at": "db", "tables": row.get("tables") or [],
-                    "sections": [{"name": n, "label": reading.arxiv.section_cn(n), "at": at}
-                                 for n, at in reading.arxiv.sections(row.get("text") or "")]}
-        meta = store.get_paper_dir_item(aid) or {}
-        summary = (row or {}).get("text") or meta.get("summary") or ""
-        return {
-            "id": aid, "title": (row or {}).get("title") or meta.get("title") or aid,
-            "source": "abstract", "text": summary, "url": meta.get("url") or "",
-            "tables": [], "lib_at": "db" if row else "",
-            "title_zh": "", "keywords": [],
-            "sections": [],
-        }
-    if biorxiv.is_id(arxiv_id):
-        aid = biorxiv.clean_id(arxiv_id)
-        row = store.get_paper_text(aid)
-        if row and (row.get("text") or "") and row.get("source") in ("html", "pdf"):
-            got = {**row, "lib_at": "db", "tables": row.get("tables") or []}
-        else:
+    if sources.kind(arxiv_id) != "arxiv":
+        # OSF / bioRxiv：库里有正文直接给；没有就去取（和 arXiv 一样排共享的活）；取不到而目录里有摘要，就给摘要
+        aid = _reading(sources.clean, arxiv_id)
+        got = await run_in_threadpool(_reading, _paper_cached, aid)
+        if got is None:
             try:
-                got = await _shared(("paper", aid), biorxiv.fulltext, aid)
-            except biorxiv.BiorxivError as exc:
-                code = 400 if exc.status == 400 else (404 if exc.status == 404 else 502)
-                raise HTTPException(code, str(exc)) from exc
-            got["lib_at"] = "db" if store.get_paper_text(aid) else ""
+                got = await _shared(("paper", aid), _paper_payload, aid)
+            except HTTPException:
+                meta = store.get_paper_dir_item(aid) or {}
+                if not meta:
+                    raise
+                got = _payload_of({"id": aid, "title": meta.get("title") or aid, "source": "abstract",
+                                   "text": meta.get("summary") or "", "url": meta.get("url") or "", "tables": []})
         zh = store.get_paper_zh(aid) or {}
-        got.setdefault("title_zh", zh.get("title_zh") or "")
-        got.setdefault("keywords", zh.get("keywords") or [])
-        got["sections"] = [{"name": n, "label": reading.arxiv.section_cn(n), "at": at}
-                           for n, at in reading.arxiv.sections(got.get("text") or "")]
-        return got
+        return {**got, "lib_at": "db" if store.get_paper_text(aid) else "",
+                "title_zh": got.get("title_zh") or zh.get("title_zh") or "",
+                "keywords": got.get("keywords") or zh.get("keywords") or []}
     aid = _reading(reading.arxiv.clean_id, arxiv_id)
     got = await run_in_threadpool(_reading, _paper_cached, aid)
     if got is None:
@@ -2169,8 +2156,9 @@ def _tutor_call(fn, *args):
         raise HTTPException(409, str(exc)) from exc
     except tutor.TutorError as exc:
         raise HTTPException(400, str(exc)) from exc
-    except reading.arxiv.ArxivError as exc:
-        raise HTTPException(400 if getattr(exc, "status", 0) == 400 else 502, str(exc)) from exc
+    except sources.ERRORS as exc:
+        st = getattr(exc, "status", 0)
+        raise HTTPException(400 if st == 400 else (404 if st == 404 else 502), str(exc)) from exc
 
 
 def _paper_ref(uid: str, raw: str) -> str:
@@ -2178,11 +2166,7 @@ def _paper_ref(uid: str, raw: str) -> str:
         if not store.get_user_paper(uid, raw):
             raise tutor.TutorError("没有这篇")
         return raw
-    if biorxiv.is_id(raw):
-        return biorxiv.clean_id(raw)
-    if osf.is_id(raw):
-        return osf.clean_id(raw)
-    return reading.arxiv.clean_id(raw)
+    return sources.clean(raw)
 
 
 @app.get("/api/tutor/{arxiv_id}")
@@ -2206,8 +2190,8 @@ def tutor_get(arxiv_id: str, uid: str, kit: str):
 async def tutor_start(arxiv_id: str, req: TutorStartReq):
     await run_in_threadpool(_user_or_404, req.uid)
     aid = _tutor_call(_paper_ref, req.uid, arxiv_id)
-    if not reading.arxiv.is_local(aid):
-        if await run_in_threadpool(_reading, reading.arxiv.cached, aid) is None:
+    if not sources.is_local(aid):
+        if await run_in_threadpool(_reading, sources.cached, aid) is None:
             await _shared(("paper", aid), _paper_payload, aid)
         await _shared(("index", aid), _paper_index, aid)
     return await _in_model_pool(_tutor_call, tutor.start, req.uid, req.kit, aid, req.restart)  # 出题要等模型：进模型池，不占公用线程
@@ -2217,8 +2201,8 @@ async def tutor_start(arxiv_id: str, req: TutorStartReq):
 async def tutor_turn(arxiv_id: str, req: TutorTurnReq):
     await run_in_threadpool(_user_or_404, req.uid)
     aid = _tutor_call(_paper_ref, req.uid, arxiv_id)
-    if not reading.arxiv.is_local(aid):
-        if await run_in_threadpool(_reading, reading.arxiv.cached, aid) is None:
+    if not sources.is_local(aid):
+        if await run_in_threadpool(_reading, sources.cached, aid) is None:
             await _shared(("paper", aid), _paper_payload, aid)
         await _shared(("index", aid), _paper_index, aid)
     return await _in_model_pool(
@@ -2234,11 +2218,11 @@ async def tutor_finish(arxiv_id: str, req: TutorFinishReq):
 
 @app.post("/api/cards", dependencies=SERIAL)
 async def card_submit(req: CardReq):
-    aid = _reading(reading.arxiv.clean_id, req.arxiv_id)
+    aid = _reading(sources.clean, req.arxiv_id)
     await run_in_threadpool(_user_or_404, req.uid)
-    if reading.arxiv.is_local(aid):
+    if sources.is_local(aid):
         return await run_in_threadpool(_card_submit, req)
-    if await run_in_threadpool(_reading, reading.arxiv.cached, aid) is None:
+    if await run_in_threadpool(_reading, sources.cached, aid) is None:
         await _shared(("paper", aid), _paper_payload, aid)  # 缓存里没有才去取；并发提交同一篇只取一次
     await _shared(("index", aid), _paper_index, aid)    # 再把引文索引建好；之后每张卡的核对都直接命中
     return await run_in_threadpool(_card_submit, req)

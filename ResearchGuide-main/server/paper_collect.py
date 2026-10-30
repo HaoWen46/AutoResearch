@@ -16,6 +16,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import arxiv  # noqa: E402
 import biorxiv  # noqa: E402
+import sources  # noqa: E402
 import interests  # noqa: E402
 import logs  # noqa: E402
 import osf  # noqa: E402
@@ -152,48 +153,21 @@ def _fulltext_node(node_id: str, want: int, source: str = "") -> dict[str, int]:
             store.put_paper_text(pid, existing, pinned=True)
             html_or_pdf += 1
             continue
-        if osf.is_id(pid):
-            try:
-                got = osf.fulltext(pid)
-                src = (got or {}).get("source") or ""
-                if src in ("html", "pdf"):
-                    store.put_paper_text(osf.clean_id(pid), got, pinned=True)
-                    html_or_pdf += 1
-                else:
-                    abstract_only += 1
-                    _log({"phase": "fulltext", "node": node_id, "paper_id": pid,
-                          "error": (got or {}).get("reason") or "abstract_only"})
-            except Exception as exc:
-                failed += 1
-                _log({"phase": "fulltext", "node": node_id, "paper_id": pid, "error": str(exc)[:200]})
-            continue
-        if biorxiv.is_id(pid):
-            try:
-                got = biorxiv.fulltext(pid)
-                src = (got or {}).get("source") or ""
-                if src in ("html", "pdf"):
-                    store.put_paper_text(biorxiv.clean_id(pid), got, pinned=True)
-                    html_or_pdf += 1
-                else:
-                    abstract_only += 1
-                    _log({"phase": "fulltext", "node": node_id, "paper_id": pid,
-                          "error": (got or {}).get("reason") or "abstract_only"})
-            except Exception as exc:
-                failed += 1
-                _log({"phase": "fulltext", "node": node_id, "paper_id": pid, "error": str(exc)[:200]})
-            continue
-        if not _is_arxiv_id(pid):
+        if sources.kind(pid) == "arxiv" and not _is_arxiv_id(pid):
             abstract_only += 1
             _log({"phase": "fulltext", "node": node_id, "paper_id": pid, "error": "not_arxiv"})
             continue
         try:
-            got = arxiv.fulltext(pid, hint={"title": row.get("title") or "", "summary": row.get("summary") or ""})
+            got = sources.fulltext(pid, hint={"title": row.get("title") or "", "summary": row.get("summary") or ""})
             src = (got or {}).get("source") or ""
             if src in ("html", "pdf"):
-                store.put_paper_text(pid, got, pinned=True)
+                store.put_paper_text(sources.clean(pid), got, pinned=True)
                 html_or_pdf += 1
             else:
                 abstract_only += 1
+                if sources.kind(pid) != "arxiv":
+                    _log({"phase": "fulltext", "node": node_id, "paper_id": pid,
+                          "error": (got or {}).get("reason") or "abstract_only"})
         except Exception as exc:
             failed += 1
             _log({"phase": "fulltext", "node": node_id, "paper_id": pid, "error": str(exc)[:200]})

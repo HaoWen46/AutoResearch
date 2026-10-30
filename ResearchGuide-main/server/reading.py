@@ -19,6 +19,7 @@ import arxiv
 import biorxiv
 import interests
 import osf
+import sources
 import quotes
 import store
 import reading_memory
@@ -168,12 +169,8 @@ def daily_source(kit_id: str, cached_only: bool = False) -> tuple[list[dict[str,
 
 
 def warm_fetch(aid: str, hint: dict[str, Any] | None = None) -> dict[str, Any]:
-    """预热取正文：按 id 前缀分派（arXiv / OSF / bioRxiv）。osf/biorxiv 的 fulltext 自己落库。"""
-    if osf.is_id(aid):
-        return osf.fulltext(aid)
-    if biorxiv.is_id(aid):
-        return biorxiv.fulltext(aid)
-    return arxiv.fulltext(aid, hint=hint)
+    """预热取正文：按 ref 分派（见 sources.py）。"""
+    return sources.fulltext(aid, hint=hint)
 
 
 def arxiv_day() -> str:
@@ -508,11 +505,7 @@ def triage(uid: str, kit_id: str, arxiv_id: str, verdict: str, why: str, title: 
     kit_id = kit_id or "*daily"
     if kit_id != "*daily":
         kit(kit_id)
-    raw = (arxiv_id or "").strip()
-    if biorxiv.is_id(raw):
-        aid = biorxiv.clean_id(raw)
-    else:
-        aid = osf.clean_id(raw) if osf.is_id(raw) else arxiv.clean_id(raw)
+    aid = sources.clean(arxiv_id)
     if verdict not in ("keep", "skip"):
         raise ReadingError("只能选「留」或「跳过」")
     why = (why or "").strip()
@@ -595,12 +588,12 @@ def _short(title: str, n: int = 40) -> str:
 def submit_card(uid: str, kit_id: str, arxiv_id: str, fields: dict[str, str], dims: dict[str, str],
                 decision_log: list[dict[str, str]] | None = None) -> dict[str, Any]:
     k = kit(kit_id)
-    aid = arxiv.clean_id(arxiv_id)
+    aid = sources.clean(arxiv_id)
     try:
-        paper = store.get_user_paper(uid, aid) if arxiv.is_local(aid) else arxiv.fulltext(aid)
+        paper = store.get_user_paper(uid, aid) if sources.is_local(aid) else (sources.cached(aid) or sources.fulltext(aid))
         if not paper:
             raise ReadingError("当前画像没有这篇论文")
-    except arxiv.ArxivError as exc:
+    except sources.ERRORS as exc:
         raise ReadingError(f"取不到原文：{exc}") from exc
     review = review_card(k, paper, fields, dims, decision_log or [])
     prev = store.latest_card(uid, kit_id, aid)
@@ -657,16 +650,20 @@ def matrix(uid: str, kit_id: str) -> dict[str, Any]:
 
 def brief(kit_id: str, arxiv_id: str) -> str:
     k = kit(kit_id)
-    aid = arxiv.clean_id(arxiv_id)
+    aid = sources.clean(arxiv_id)
     p = kit_paper(k, aid) or {"title": aid, "why": ""}
+    if sources.kind(aid) == "arxiv":
+        origin = f"https://arxiv.org/abs/{aid} （HTML 版：https://arxiv.org/html/{aid}）"
+    else:
+        origin = sources.landing_url(aid, (store.get_paper_dir_item(aid) or {}).get("url") or "")
     dims = "\n".join(f"- {d['label']}：{d.get('hint', '')}" for d in k["dimensions"])
     fields = "\n".join(f"- {f['label']}：{f['hint']}" for f in CARD_FIELDS)
     return f"""# 启研 · 阅读卡简报（标准 reading-card v1 · 工具包 {k['id']} v{k['version']}）
 
-你是一名本科生的研究助手。这名学生在为 arXiv:{aid}《{p['title']}》写一张阅读卡。卡由学生自己写，你只做下面允许的事。
+你是一名本科生的研究助手。这名学生在为 {sources.label(aid)}:{aid}《{p['title']}》写一张阅读卡。卡由学生自己写，你只做下面允许的事。
 
 ## 原文
-https://arxiv.org/abs/{aid} （HTML 版：https://arxiv.org/html/{aid}）
+{origin}
 
 ## 卡的栏目（学生交到启研）
 {fields}

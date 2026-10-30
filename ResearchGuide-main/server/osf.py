@@ -123,11 +123,8 @@ def clean_id(raw: str) -> str:
     return f"{m.group(1).lower()}:{m.group(2).lower()}"
 
 
-def fulltext(pid: str) -> dict[str, Any]:
-    """下载 preprint 的 primary_file，抽 PDF 文字；没有文件就返回摘要。"""
-    aid = clean_id(pid)
-    oid = aid.split(":", 1)[1]
-    url = OSF + urllib.parse.quote(oid) + "/?embed=primary_file"
+def _api_json(url: str) -> dict[str, Any]:
+    """OSF JSON:API 一次 GET（和 recent 共用限速锁，间隔 ≥1 秒）。"""
     with _LOCK:
         wait = 1.0 - (time.time() - _LAST[0])
         if wait > 0:
@@ -146,15 +143,43 @@ def fulltext(pid: str) -> dict[str, Any]:
         data = json.loads(raw.decode("utf-8"))
     except json.JSONDecodeError as exc:
         raise OsfError("OSF 回包不是 JSON") from exc
-    attrs = ((data.get("data") or {}).get("attributes") or {}) if isinstance(data, dict) else {}
-    title = _clean(str(attrs.get("title") or ""), 300)
-    summary = _clean(str(attrs.get("description") or ""), 2000)
-    html_url = (((data.get("data") or {}).get("links") or {}).get("html")) or f"https://osf.io/{oid}/"
-    file_url = ""
-    emb = ((data.get("data") or {}).get("embeds") or {}).get("primary_file") or {}
+    return data if isinstance(data, dict) else {}
+
+
+def primary_file_url(data: dict[str, Any]) -> str:
+    """preprint 详情里找 primary_file 的下载地址。
+    老接口 `?embed=primary_file` 自 2026-10 起一律 502，所以详情不带 embed，走 relationships.primary_file
+    的 related 链接再取一次文件记录（有 embeds 时仍优先用，少打一次）。找不到返回空串。"""
+    emb = ((data.get("embeds") or {}).get("primary_file") or {}) if isinstance(data.get("embeds"), dict) else {}
     fdata = emb.get("data") if isinstance(emb, dict) else None
     if isinstance(fdata, dict):
-        file_url = ((fdata.get("links") or {}).get("download")) or ""
+        dl = ((fdata.get("links") or {}).get("download")) or ""
+        if dl:
+            return dl
+    rel = (data.get("relationships") or {}).get("primary_file") or {}
+    href = (((rel.get("links") or {}).get("related") or {}).get("href")) or ""
+    if not href and isinstance(rel.get("data"), dict) and rel["data"].get("id"):
+        href = f"https://api.osf.io/v2/files/{urllib.parse.quote(str(rel['data']['id']))}/"
+    if not href:
+        return ""
+    fd = _api_json(href).get("data") or {}
+    return ((fd.get("links") or {}).get("download")) or "" if isinstance(fd, dict) else ""
+
+
+def fulltext(pid: str) -> dict[str, Any]:
+    """下载 preprint 的 primary_file，抽 PDF 文字；没有文件就返回摘要。"""
+    aid = clean_id(pid)
+    oid = aid.split(":", 1)[1]
+    data = _api_json(OSF + urllib.parse.quote(oid) + "/")
+    node = data.get("data") or {}
+    attrs = (node.get("attributes") or {}) if isinstance(node, dict) else {}
+    title = _clean(str(attrs.get("title") or ""), 300)
+    summary = _clean(str(attrs.get("description") or ""), 2000)
+    html_url = ((node.get("links") or {}).get("html")) or f"https://osf.io/{oid}/"
+    try:
+        file_url = primary_file_url(node)
+    except OsfError:
+        file_url = ""  # 文件记录取不到：按没有 PDF 处理，摘要照给
     if file_url:
         try:
             blob = _download(file_url)

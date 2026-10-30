@@ -2,6 +2,7 @@
 """sources：一个 ref 决定来源；OSF / bioRxiv 论文能打开、能带读（原来 400）；预热分派；可达性探针。全离线。"""
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 
@@ -164,3 +165,65 @@ def test_admin_probe_endpoint(monkeypatch):
     assert client.get("/api/admin/sources/probe").status_code in (403, 429)
     r = client.get("/api/admin/sources/probe?timeout=3", headers={"X-Admin-Token": token})
     assert r.status_code == 200 and r.json()["sources"]["openalex"]["ok"] is True
+
+
+# ---- OSF 正文：详情不带 embed（2026-10 起 ?embed=primary_file 一律 502），走 relationships 取文件记录 ----
+
+def _osf_fetch(calls, detail, file_rec=None, blob=b"%PDF-1.4 fake"):
+    import urllib.error
+    def fake_fetch(req, timeout=40, max_bytes=0):
+        url = req.full_url
+        calls.append(url)
+        if "embed=" in url:
+            raise urllib.error.HTTPError(url, 502, "Bad Gateway", {}, None)
+        if url.startswith("https://api.osf.io/v2/preprints/"):
+            return json.dumps(detail).encode("utf-8")
+        if url.startswith("https://api.osf.io/v2/files/"):
+            if file_rec is None:
+                raise urllib.error.HTTPError(url, 404, "Not Found", {}, None)
+            return json.dumps(file_rec).encode("utf-8")
+        if url.startswith("https://osf.io/download/"):
+            return blob
+        raise AssertionError(url)
+    return fake_fetch
+
+
+DETAIL = {"data": {"id": "btvr8_v2", "type": "preprints",
+                   "attributes": {"title": "Working Memory Development", "description": "An abstract."},
+                   "links": {"html": "https://osf.io/preprints/psyarxiv/btvr8_v2/"},
+                   "relationships": {"primary_file": {"links": {"related": {"href": "https://api.osf.io/v2/files/6ae45ee8/"}},
+                                                      "data": {"id": "6ae45ee8", "type": "files"}}}}}
+FILE_REC = {"data": {"id": "6ae45ee8", "type": "files", "attributes": {"name": "WMdev_preprint.pdf"},
+                     "links": {"download": "https://osf.io/download/6ae45ee8/"}}}
+
+
+def test_osf_fulltext_follows_primary_file_relationship(monkeypatch):
+    import pdf as pdf_mod
+    calls = []
+    monkeypatch.setattr(osf, "fetch", _osf_fetch(calls, DETAIL, FILE_REC))
+    monkeypatch.setattr(pdf_mod, "extract_pdf", lambda blob: {"title": "", "text": "1 Introduction\n" + "x " * 1200})
+    got = osf.fulltext("psyarxiv:btvr8")
+    assert got["source"] == "pdf" and got["title"] == "Working Memory Development"
+    assert got["url"] == "https://osf.io/preprints/psyarxiv/btvr8_v2/" and got["id"] == "psyarxiv:btvr8"
+    assert calls[0] == "https://api.osf.io/v2/preprints/btvr8/" and "embed=" not in calls[0]
+    assert calls[1] == "https://api.osf.io/v2/files/6ae45ee8/" and calls[2] == "https://osf.io/download/6ae45ee8/"
+
+
+def test_osf_fulltext_abstract_when_file_record_missing(monkeypatch):
+    calls = []
+    monkeypatch.setattr(osf, "fetch", _osf_fetch(calls, DETAIL, file_rec=None))
+    got = osf.fulltext("psyarxiv:btvr8")
+    assert got["source"] == "abstract" and got["text"] == "An abstract." and got["reason"] == "no_pdf"
+    bare = {"data": {**DETAIL["data"], "relationships": {}}}
+    monkeypatch.setattr(osf, "fetch", _osf_fetch(calls, bare))
+    assert osf.fulltext("psyarxiv:btvr8")["source"] == "abstract"
+
+
+def test_osf_fulltext_reports_upstream_status(monkeypatch):
+    import urllib.error
+    def down(req, timeout=40, max_bytes=0):
+        raise urllib.error.HTTPError(req.full_url, 503, "Service Unavailable", {}, None)
+    monkeypatch.setattr(osf, "fetch", down)
+    with pytest.raises(osf.OsfError) as exc:
+        osf.fulltext("psyarxiv:btvr8")
+    assert exc.value.status == 503

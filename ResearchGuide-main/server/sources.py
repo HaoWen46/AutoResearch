@@ -26,6 +26,7 @@ import osf
 import store
 
 ERRORS = (arxiv.ArxivError, osf.OsfError, biorxiv.BiorxivError, openalex.OpenAlexError)
+RETRY_ABSTRACT = 7 * 24 * 3600  # 没拿到正文时多久以后再试（来源自己给了 retry_after 就用它的）
 LABELS = {"arxiv": "arXiv", "psyarxiv": "PsyArXiv", "socarxiv": "SocArXiv",
           "biorxiv": "bioRxiv", "medrxiv": "medRxiv", "openalex": "DOI", "local": "导入 PDF"}
 _BIO_RE = re.compile(r"^(biorxiv|medrxiv):(10\.\d{4,5})\.(.+)$", re.I)
@@ -119,12 +120,18 @@ def fulltext(ref: str, hint: dict[str, Any] | None = None) -> dict[str, Any]:
     if k == "biorxiv":
         return biorxiv.fulltext(ref)
     if k in ("osf", "openalex"):
+        # 只有摘要的结果也落库并带 retry_after：到期前再打开这篇不再问上游（和 arxiv.fulltext 的摘要退路一致）
+        ref = clean(ref)
+        row = store.get_paper_text(ref)
+        if row and row.get("source") == "abstract" and time.time() < float(row.get("retry_after") or 0):
+            return _shape(row, ref)
         got = osf.fulltext(ref) if k == "osf" else openalex.fulltext(ref)
-        if has_fulltext(got):
-            try:
-                store.put_paper_text(clean(ref), got)
-            except Exception:
-                pass
+        if not has_fulltext(got) and not float(got.get("retry_after") or 0):
+            got["retry_after"] = time.time() + RETRY_ABSTRACT
+        try:
+            store.put_paper_text(ref, got)
+        except Exception:
+            pass
         return got
     raise arxiv.ArxivError("导入的 PDF 只在本人账号里，不走公共正文", 400)
 

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -228,3 +229,19 @@ def test_osf_fulltext_reports_upstream_status(monkeypatch):
     with pytest.raises(osf.OsfError) as exc:
         osf.fulltext("psyarxiv:btvr8")
     assert exc.value.status == 503
+
+
+def test_abstract_only_results_are_stored_with_retry(monkeypatch):
+    """OSF / OpenAlex 只拿到摘要时也落库；retry_after 没到之前再打开不问上游。"""
+    calls = []
+    monkeypatch.setattr(osf, "fulltext", lambda pid: calls.append(pid) or {"id": pid, "title": "t", "source": "abstract", "text": "abs", "url": "https://osf.io/abcde/", "tables": [], "retry_after": 0, "reason": "no_pdf"})
+    got = sources.fulltext(OSF_ID)
+    assert got["source"] == "abstract" and got["retry_after"] > time.time() + 3600
+    row = store.get_paper_text(OSF_ID)
+    assert row and row["source"] == "abstract" and float(row["retry_after"]) > time.time() + 3600
+    again = sources.fulltext(OSF_ID)
+    assert again["source"] == "abstract" and again["text"] == "abs" and calls == [OSF_ID]  # 第二次没打上游
+    assert sources.cached(OSF_ID) is None  # 摘要仍不算正文，页面照样写「只取到摘要」
+    store.put_paper_text(OSF_ID, {**got, "retry_after": time.time() - 1})
+    sources.fulltext(OSF_ID)
+    assert calls == [OSF_ID, OSF_ID]  # 到期后再问
